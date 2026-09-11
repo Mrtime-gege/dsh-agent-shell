@@ -374,6 +374,24 @@ for (const [rel, markers] of Object.entries({
 }
 notes.push('安全告知内容（AI 开发 / 无审批 / 护栏非防护）均在位')
 
+/* ---------- 6.6 README 必须带着改动记录，且不能落后于版本号 ---------- */
+
+// README 是门面：用户先看它，才轮到 CHANGELOG。所以「这一版改了什么」必须在 README 里，
+// 而且发布时必须跟上版本号 —— 只更 CHANGELOG 不动 README 是最容易发生的漂移。
+{
+  const abs = join(ROOT, 'README.md')
+  if (existsSync(abs)) {
+    const body = readFileSync(abs, 'utf8')
+    if (!body.includes('## 更新与修复记录')) {
+      fail('README.md 缺少「## 更新与修复记录」章节（改动记录要在门面上）')
+    } else if (!body.includes(version)) {
+      fail(`README.md 的改动记录里没有当前版本 ${version}（发版时 README 不能落后于 CHANGELOG）`)
+    } else {
+      notes.push(`README.md 带着改动记录，且已跟上版本 ${version}`)
+    }
+  }
+}
+
 /* ---------- 7. bundle patch ---------- */
 
 const patchPath = join(ROOT, 'cordis.patch.yml')
