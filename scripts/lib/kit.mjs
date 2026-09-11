@@ -107,6 +107,15 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   let settingsSource = () => config
   const settingsChanges = []
   const settingsRegistrations = []
+  // 可选：假的 ctx.systemPrompt（验证「注册了使用策略段落」而不必真起 DSH）
+  const systemPromptContexts = []
+  const systemPrompt = config.__withSystemPrompt === true
+    ? {
+        context: (contribution) => { systemPromptContexts.push(contribution); return () => {} },
+        getContextOrder: () => 100,
+      }
+    : undefined
+
   let settingsHooks = null
   const settings = config.__withSettings === true
     ? {
@@ -125,14 +134,18 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   const services = { subprocess, timer }
   if (settings !== undefined) services.settings = settings
   const ctx = {
-    get: (name) => ({ subprocess, timer, settings })[name],
+    get: (name) => ({ subprocess, timer, settings, systemPrompt })[name],
     effect,
     on: () => () => {},
     logger: { log: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')) },
     tools: { register: (def) => { tools.set(def.name, def); return () => {} } },
     inject: (names, cb) => {
-      if (!names.includes('webServer')) return
-      cb({ get: (n) => (n === 'webServer' ? webServer : undefined), webServer, effect })
+      if (names.includes('webServer')) {
+        cb({ get: (n) => (n === 'webServer' ? webServer : undefined), webServer, effect })
+      }
+      if (names.includes('systemPrompt') && systemPrompt !== undefined) {
+        cb({ get: (n) => (n === 'systemPrompt' ? systemPrompt : undefined), systemPrompt, effect })
+      }
     },
   }
 
@@ -199,7 +212,8 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   }
 
   return { pkgDir, tools, routes, run, call, driver, tmux, cleanup, logs, subprocess, timer,
-    settings, settingsRegistrations, changeSettings, reloadConfig: () => config }
+    settings, settingsRegistrations, changeSettings, reloadConfig: () => config,
+    systemPromptContexts }
 }
 
 /** 断言器：收集失败而不是立刻抛出，跑完一次性汇报。 */

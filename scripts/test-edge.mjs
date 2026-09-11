@@ -33,7 +33,7 @@ if (!existsSync(tgz)) {
 
 console.log(`peer 来自 ${peersDir}\n测试产物 ${tgz}\n`)
 
-const h = await makeHarness({ tgz, peersDir, socket: SOCKET, config: { maxSessions: 3, __withSettings: true } })
+const h = await makeHarness({ tgz, peersDir, socket: SOCKET, config: { maxSessions: 3, __withSettings: true, __withSystemPrompt: true } })
 const { run, call, tmux } = h
 const { check, rejects, report } = makeChecker()
 
@@ -304,6 +304,36 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
 
   // 3) 改回默认，免得影响后续小节
   h.changeSettings({ maxSessions: 3, historyLimit: 100000 })
+}
+
+/* ── 7.8 使用策略：别随手用持久化 shell ─────────────────────────────────────── */
+
+{
+  // 1) 系统提示里必须有一节整体策略
+  check(h.systemPromptContexts.length === 1, `注册了 1 段系统提示（实际 ${h.systemPromptContexts.length}）`)
+  const section = h.systemPromptContexts[0]
+  check(section !== undefined && section.name === 'agent-shell:usage', `段落名 = ${section ? section.name : '(无)'}`)
+  check(section !== undefined && Number.isFinite(section.order), `段落 order 是有限数字：${section ? section.order : '-'}`)
+  const policy = typeof section?.text === 'string' ? section.text : ''
+  for (const [needle, why] of [
+    ['Prefer the ordinary command-line', '明确「优先用常规命令行工具」'],
+    ['sudo', '列出真正需要交互式 TTY 的场景'],
+    ['explicitly asks', '说明「用户明确要求」时才用'],
+    ['Do not open a shell casually', '禁止随手开 shell'],
+    ['shell_close', '要求用完关掉，别留空闲 shell'],
+    ['does not ask', '如实说明不经过审批'],
+    ['heuristic speed bump', '如实说明护栏不是安全网'],
+  ]) {
+    check(policy.includes(needle), `使用策略包含「${why}」`)
+  }
+
+  // 2) 工具描述里也要有策略（模型是逐个工具看 schema 的）
+  const desc = (name) => String(h.tools.get(name)?.description ?? '')
+  check(desc('shell_open').includes('ONLY') && desc('shell_open').includes('ordinary command-line tools'),
+    'shell_open 描述里写明「仅在必要时使用」')
+  check(desc('shell_close').includes('idle shells'), 'shell_close 描述里提醒关掉空闲 shell')
+  check(desc('shell_send').includes('Only for shells this plugin owns'), 'shell_send 描述里限定适用范围')
+  check(desc('shell_list').includes('before closing'), 'shell_list 描述里提示可用于判断是否还需要')
 }
 
 /* ── 8. 生命周期与自愈（本文件只做不依赖 harness 的部分）──────────────────── */
