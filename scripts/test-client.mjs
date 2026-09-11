@@ -320,6 +320,50 @@ if (typeof infoRows === 'function') {
   check(guardRow !== undefined && guardRow.includes('未知'), `未上报时护栏状态显示未知：${guardRow}`)
 }
 
+/* ── 折叠胶囊的显示模型（pillModel）──────────────────────────────────────────── */
+
+const pillModel = plugin?.__pillModel
+const sessionBusy = plugin?.__sessionBusy
+check(typeof pillModel === 'function' && typeof sessionBusy === 'function', '胶囊显示模型与忙闲判定已暴露')
+
+if (typeof pillModel === 'function') {
+  // 忙闲判定：shell 自己不算忙，且要认登录 shell（-bash）与自定义 shell 名
+  check(sessionBusy({ foreground: 'bash' }, 'bash') === false, 'sessionBusy：前台就是 bash → 空闲')
+  check(sessionBusy({ foreground: '-bash' }, 'bash') === false, 'sessionBusy：登录 shell -bash → 空闲')
+  check(sessionBusy({ foreground: 'zsh' }, 'zsh') === false, 'sessionBusy：自定义 shell 名同样识别')
+  check(sessionBusy({ foreground: 'make' }, 'bash') === true, 'sessionBusy：前台是 make → 在跑')
+  check(sessionBusy({ foreground: '' }, 'bash') === false, 'sessionBusy：前台为空 → 空闲')
+  check(sessionBusy(null, 'bash') === false, 'sessionBusy：没有会话 → 空闲')
+
+  const idle = pillModel({ sessions: [{ name: 'dsh-build', foreground: 'bash' }], currentName: 'dsh-build', locked: true, shellName: 'bash' })
+  check(idle.label === 'build', `名字去掉统一的 dsh- 前缀：${idle.label}`)
+  check(idle.counter === '', '只有一个 shell 时不显示 1/1')
+  check(idle.busy === false && idle.dotTone === 'idle', '空闲 → 状态点为 idle')
+  check(idle.lockTone === 'dim', '锁定 → 锁用安静色（不再把安全默认标成警告）')
+
+  const busy = pillModel({
+    sessions: [{ name: 'dsh-a', foreground: 'make' }, { name: 'dsh-b', foreground: 'bash' }, { name: 'dsh-c', foreground: 'python' }],
+    currentName: 'dsh-b', locked: false, shellName: 'bash',
+  })
+  check(busy.counter === '2/3', `多 shell 时显示位置/总数：${busy.counter}`)
+  check(busy.busy === false && busy.running === 2, `当前空闲但整体有 2 个在跑：running=${busy.running}`)
+  check(busy.lockTone === 'warn', '解锁 → 锁用注意色（语义修正）')
+  check(busy.title.includes('2 个在运行'), '工具提示给出「共几个在跑」')
+  check(busy.title.includes('输入已解锁'), '工具提示如实说明解锁状态')
+  check(busy.title.includes('未接入官方审批'), '工具提示保留安全告知')
+
+  const long = pillModel({ sessions: [{ name: 'dsh-a-very-long-session-name-here', foreground: 'bash' }], currentName: 'dsh-a-very-long-session-name-here', locked: true })
+  check(long.label.length <= 16 && long.label.endsWith('…'), `超长名字截断：${long.label}`)
+  check(long.fullName === 'dsh-a-very-long-session-name-here', '完整名字仍保留给工具提示')
+
+  const empty = pillModel({ sessions: [], currentName: '', locked: true })
+  check(empty.empty === true && empty.label === '无 shell' && empty.dotTone === 'none', `没有 shell 时的空态：${empty.label}`)
+  check(empty.title.includes('还没有 shell'), '空态工具提示告诉用户下一步怎么做')
+
+  const junk = pillModel({ sessions: [null, 'x', { name: 'dsh-ok', foreground: 'bash' }], currentName: 'dsh-ok', locked: true })
+  check(junk.total === 1 && junk.label === 'ok', '垃圾会话条目被过滤，不会渲染出 undefined')
+}
+
 /* ── 组件渲染 + 事件处理器遍历（抓「只在打开面板时才炸」的错误）──────────────── */
 
 const ShellPanel = plugin?.__ShellPanel
