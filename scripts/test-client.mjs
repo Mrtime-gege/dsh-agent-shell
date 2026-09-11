@@ -377,6 +377,43 @@ check(padStyleOk, '屏幕区内边距由 SCREEN_PAD_Y 推导（样式与滚动�
 
 /* ── 详情层里的「参数设置」一行：三种状态必须分开 ───────────────────────────── */
 
+/* ── 详情层里的「浏览器面闸门」一行：谁在把关、有没有降级 ─────────────────── */
+
+const fenceRowValue = plugin?.__fenceRowValue
+check(typeof fenceRowValue === 'function', '闸门显示函数 __fenceRowValue 已暴露')
+
+if (typeof fenceRowValue === 'function') {
+  const local = fenceRowValue({
+    fence: { boundHost: '127.0.0.1', port: 3080, authority: 'local', note: '本地围栏：Host 必须为回环 + 拒绝跨站' },
+  })
+  check(local.includes('本地围栏') && local.includes('127.0.0.1:3080'), `本地围栏 → 「${local}」`)
+
+  const dsh = fenceRowValue({ fence: { boundHost: '127.0.0.1', port: 3080, authority: 'dsh-connection', note: 'x' } })
+  check(dsh.includes('DSH connection'), `复用 DSH 围栏时如实标注 → 「${dsh}」`)
+
+  const degraded = fenceRowValue({ fence: { boundHost: '0.0.0.0', port: 3080, authority: 'local', note: '⚠ 服务绑在 0.0.0.0：…' } })
+  check(degraded.startsWith('⚠') && degraded.includes('Host 围栏不可用'),
+    `降级必须显眼（不是藏在悬停里）→ 「${degraded}」`)
+
+  const quiet = fenceRowValue({ fence: { boundHost: '127.0.0.1', port: 3080, authority: 'local', note: 'ok' } })
+  check(!quiet.includes('已拒'), '没有被拒记录时不显示计数')
+  const counted = fenceRowValue({
+    fence: { boundHost: '127.0.0.1', port: 3080, authority: 'local', note: 'ok' },
+    // 被拒记录往往就是「面板行为反常」的现场证据，所以这一行要让它露出来
+    fenceBlocked: [{ path: '/keys', why: 'cross-site request rejected' }],
+  })
+  check(counted.includes('已拒 1 次'), `有被拒记录时显示次数 → 「${counted}」`)
+
+  const unknown = fenceRowValue({ socket: 'dsh-agent' })
+  check(unknown.includes('未知'), `旧宿主未上报 → 「${unknown}」`)
+
+  const title = plugin.__fenceRowTitle
+  const t = title({ fence: { note: 'note-text' }, fenceBlocked: [{ path: '/keys', why: 'cross-site request rejected' }] })
+  check(t.includes('note-text') && t.includes('/keys') && t.includes('cross-site'),
+    `悬停给出降级原因与最近一次拒绝：${t.replace(/\n/g, ' | ')}`)
+  check(title({ fence: { note: '' } }) === '', '没有可说的就不编造说明文字')
+}
+
 const settingsRowValue = plugin?.__settingsRowValue
 check(typeof settingsRowValue === 'function', '设置状态显示函数 __settingsRowValue 已暴露')
 

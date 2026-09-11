@@ -132,7 +132,12 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
         },
       }
     : undefined
-  const webServer = { register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) } }
+  // 真服务有 host/port getter，闸门据此判断「是否本机 + 端口是否一致」，桩必须同样提供。
+  const webServer = {
+    host: String(config.__bindHost ?? '127.0.0.1'),
+    port: Number.isFinite(config.__bindPort) ? config.__bindPort : 3080,
+    register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) },
+  }
   const effect = (cb) => cb()
   const base = String(config.httpBase ?? '/plugins/shell')
   const services = { subprocess, timer }
@@ -163,11 +168,20 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
     return typeof value === 'string' ? value : JSON.stringify(value)
   }
 
-  const call = async (path, method = 'GET', body) => {
+  const call = async (path, method = 'GET', body, headers = {}) => {
     const routePath = `${base}${path.split('?')[0]}`
     const handler = routes.get(routePath)
     if (handler === undefined) throw new Error(`路由不存在：${routePath}`)
-    const req = { url: path, method, headers: {}, socket: { remoteAddress: '127.0.0.1' }, on: () => {}, destroy () {} }
+    // 默认头 = 面板实际发出的形状（回环 Host；写请求带 application/json）。
+    // 想测攻击形状就传 headers 覆盖，例如 { 'sec-fetch-site': 'cross-site' }。
+    const defaults = {
+      host: `${webServer.host === '0.0.0.0' ? '127.0.0.1' : webServer.host}:${webServer.port}`,
+    }
+    if (method !== 'GET') defaults['content-type'] = 'application/json'
+    const req = {
+      url: path, method, headers: { ...defaults, ...headers },
+      socket: { remoteAddress: '127.0.0.1' }, on: () => {}, destroy () {},
+    }
     if (method !== 'GET') {
       // 传 `raw` 时按原始字节送（用来测非法 JSON）
       const payload = body !== undefined && body !== null && body.__raw !== undefined

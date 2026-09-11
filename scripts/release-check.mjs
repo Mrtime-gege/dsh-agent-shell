@@ -374,6 +374,25 @@ for (const [rel, markers] of Object.entries({
 }
 notes.push('安全告知内容（AI 开发 / 无审批 / 护栏非防护）均在位')
 
+/* ---------- 6.4 浏览器面闸门的配套不变量 ---------- */
+
+// 闸门要求「写请求必须是 application/json」（这是挡住跨站「简单请求」的那一条）。
+// 面板自己少发一个头，就会被自己的闸门挡在外面 —— 而且是 403 这种看起来像后端坏了的形态。
+{
+  const abs = join(ROOT, 'lib', 'client.js')
+  if (existsSync(abs)) {
+    const body = readFileSync(abs, 'utf8')
+    const posts = [...body.matchAll(/method:\s*'POST'/g)]
+    const missing = posts.filter((m) => {
+      const window = body.slice(Math.max(0, m.index - 400), m.index + 400)
+      return !window.includes('content-type')
+    })
+    if (posts.length === 0) fail('lib/client.js 里找不到任何 POST 调用（闸门不变量无法校验）')
+    else if (missing.length > 0) fail(`lib/client.js 有 ${missing.length} 个 POST 没带 content-type：会被浏览器面闸门拒绝`)
+    else notes.push(`客户端 ${posts.length} 个写请求都带 JSON 头（闸门要求）`)
+  }
+}
+
 /* ---------- 6.6 README 必须带着改动记录，且不能落后于版本号 ---------- */
 
 // README 是门面：用户先看它，才轮到 CHANGELOG。所以「这一版改了什么」必须在 README 里，

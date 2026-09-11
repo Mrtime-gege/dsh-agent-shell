@@ -2,6 +2,24 @@
 
 本文件记录 `dsh-agent-shell` 的版本变化。
 
+## 未发布
+
+### 安全
+
+- **浏览器面闸门**：这组 HTTP 路由无鉴权，此前任何网页都能对它发跨站「简单请求」——而请求体解析
+  **不看 Content-Type**，于是 `POST /plugins/shell/keys` 等于任意网页可使用的远程命令执行（响应读不到，
+  但命令已执行）。现在：拒绝 `Sec-Fetch-Site: cross-site`、`Origin` 必须与 `Host` 同源（含拒绝
+  `Origin: null`）、写请求必须是 `application/json`（强制预检）、`Host` 必须为回环且端口一致
+  （挡 DNS rebinding）。闸门在**路由注册处统一包裹**，新路由不会漏；部署若挂了 DSH 的
+  `connection` 服务则优先采用它的围栏与会话校验，否则本地等价实现。
+- **配置值 → 命令注入**：`socket` 派生的 conf/pid 路径此前无引号拼进 `sh -c`（6 处）。现在 socket 在
+  解析处收敛到 `[A-Za-z0-9._-]` 并如实报告改写，所有 shell 插值统一走 `shQuote`。
+- 新增 `allowedHosts`（默认空）：只放宽 `Host` 判定，供反向代理部署使用（否则面板会被自己的闸门
+ 403）；跨站与 JSON 检查照旧，不接受 `*`，改完立即生效。
+- 面板 ⓘ 新增「浏览器面闸门」行；`/list` 与 `shell_diagnose` 上报闸门形态、被拒记录与 socket 收敛提示。
+- `SECURITY.md` 重写第 1 条并新增第 8（攻击面清单）、第 9（配置注入面）条，明确区分「已挡住」与
+  「接受的风险」。
+
 ## 0.1.3 — 发布链路自动化：推 tag 即发布（带 provenance）
 
 把发布从「本地 `npm publish` + 手工授权」改成 **推 tag → CI 用 OIDC 身份自动发布**。

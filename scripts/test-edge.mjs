@@ -17,8 +17,9 @@
  * 用法：DSH_PEERS_DIR=/path/to/dsh-webui node scripts/test-edge.mjs [tgz]
  */
 
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { makeHarness, makeChecker, resolvePeers, packIntoTemp, skipOrFail } from './lib/kit.mjs'
-import { existsSync } from 'node:fs'
 
 const SOCKET = 'dsh-edge'
 const peersDir = resolvePeers(process.argv[3])
@@ -346,7 +347,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   // schemastery 的 toJSON 把根 schema 放在 refs[uid] 里，dict 的值是 ref 编号
   const rootRef = typeof schemaJson.uid === 'number' ? schemaJson.refs?.[String(schemaJson.uid)] : schemaJson
   const fields = Object.entries(rootRef?.dict ?? {})
-  check(fields.length >= 14, `schema 里暴露了 ${fields.length} 个参数`)
+  check(fields.length >= 15, `schema 里暴露了 ${fields.length} 个参数`)
   const resolveRef = (ref) => (typeof ref === 'number' ? schemaJson.refs[String(ref)] : ref)
   const noDoc = []
   for (const [key, ref] of fields) {
@@ -388,6 +389,8 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   rejects({ socket: '' }, 'socket 为空')
   rejects({ httpBase: 'plugins/shell' }, 'httpBase 不以 / 开头')
   rejects({ shell: '   ' }, 'shell 是空白')
+  rejects({ allowedHosts: ['https://dsh.example.com'] }, 'allowedHosts 带协议前缀')
+  rejects({ allowedHosts: ['*'] }, 'allowedHosts 通配符')
 
   // 合法值不能被误杀（默认值、边界值都要过）
   let accepted = ''
@@ -395,6 +398,152 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     validate(candidate({ cols: 20, rows: 500, maxSessions: 64, historyLimit: 100 }))
   } catch (error) { accepted = String(error && error.message ? error.message : error) }
   check(accepted === '', `边界内的取值可以保存（${accepted || '通过'}）`)
+}
+
+/* ── 7.6 浏览器面闸门：CSRF / DNS rebinding / 本机越权 ─────────────────────── */
+
+{
+  const fenceReason = h.mod.fenceReason
+  check(typeof fenceReason === 'function', 'fenceReason 已导出（闸门判定为纯函数，可离线复现）')
+
+  const LOOP = { requireLoopback: true, port: 3080 }
+  const ask = (headers, method = 'GET', options = LOOP) => fenceReason({ headers, method }, options)
+
+  // 面板真实形状必须放行 —— 闸门一旦误伤，面板就废了
+  check(ask({ host: '127.0.0.1:3080' }) === null, '放行：面板的 GET 形状（回环 Host，无 Origin）')
+  check(ask({ host: '127.0.0.1:3080', 'content-type': 'application/json' }, 'POST') === null,
+    '放行：面板的 POST 形状（JSON Content-Type）')
+  check(ask({ host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080', 'content-type': 'application/json' }, 'POST') === null,
+    '放行：同源 Origin + JSON（浏览器 POST 的真实形状）')
+  check(ask({ host: 'localhost:3080' }) === null, '放行：localhost 也算本机')
+
+  // DNS rebinding：Host 不是本机 → 必须拒绝（这条是唯一能挡住 rebinding 的检查）
+  const rebind = ask({ host: 'evil.example:3080' })
+  check(rebind !== null && rebind.includes('loopback'), `拒绝 DNS rebinding 形状的 Host：${rebind}`)
+  check(ask({ host: '127.0.0.1:9999' }) !== null, '拒绝：Host 端口与服务端不一致')
+  check(ask({}) !== null, '拒绝：完全没有 Host 头')
+
+  // CSRF：跨站标记 / 异源 Origin / 非 JSON 的写请求
+  check(ask({ host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' }, 'POST') !== null, '拒绝：Sec-Fetch-Site: cross-site')
+  check(ask({ host: '127.0.0.1:3080', origin: 'http://evil.example' }, 'POST') !== null, '拒绝：Origin 与 Host 不同源')
+  check(ask({ host: '127.0.0.1:3080', origin: 'null' }, 'POST') !== null, '拒绝：Origin: null（沙箱 iframe / file://）')
+  const formPost = ask({ host: '127.0.0.1:3080', 'content-type': 'application/x-www-form-urlencoded' }, 'POST')
+  check(formPost !== null && formPost.includes('application/json'), `拒绝：跨站「简单请求」能发的表单类型：${formPost}`)
+  const textPost = ask({ host: '127.0.0.1:3080', 'content-type': 'text/plain' }, 'POST')
+  check(textPost !== null, `拒绝：text/plain 写请求（跨站简单请求，浏览器不预检）—— 这正是修复前能打通的那条：${textPost}`)
+
+  // 有 DSH connection 服务时以它为准（它有部署的 trustedHosts 与会话鉴权）
+  const conn403 = { requestRejection: () => 403 }
+  check(fenceReason({ headers: { host: '127.0.0.1:3080' }, method: 'GET' }, { connection: conn403, ...LOOP }) !== null,
+    'DSH 围栏拒绝时一律拒绝（权威判断优先）')
+  const conn401 = { requestRejection: () => 401 }
+  const why401 = fenceReason({ headers: { host: '127.0.0.1:3080' }, method: 'GET' }, { connection: conn401, ...LOOP })
+  check(why401 !== null && why401.includes('not authenticated'), `DSH 判定未鉴权时拒绝（本机其它进程就挡在这里）：${why401}`)
+  const connOk = { requestRejection: () => undefined }
+  check(fenceReason({ headers: { host: '127.0.0.1:3080' }, method: 'GET' }, { connection: connOk, ...LOOP }) === null,
+    'DSH 围栏放行且本地检查也通过 → 放行')
+  check(fenceReason({ headers: { host: 'evil.example:3080' }, method: 'GET' }, { connection: connOk, ...LOOP }) !== null,
+    'DSH 放行也不能绕过本地 Host 检查（纵深防御，不依赖单点）')
+
+  // 反向代理部署：额外信任的 Host 可放行，但**不能**因此绕过跨站检查
+  const trustedHostMatch = h.mod.trustedHostMatch
+  check(typeof trustedHostMatch === 'function', 'trustedHostMatch 已导出')
+  check(trustedHostMatch(new URL('http://dsh.example.com'), ['dsh.example.com']) === true,
+    '白名单按主机名匹配（代理常把端口省掉）')
+  check(trustedHostMatch(new URL('http://dsh.example.com:8443'), ['dsh.example.com:8443']) === true,
+    '白名单带端口时精确匹配')
+  check(trustedHostMatch(new URL('http://dsh.example.com:9999'), ['dsh.example.com:8443']) === false,
+    '带端口的条目不会匹配别的端口')
+  check(trustedHostMatch(new URL('http://evil.example'), ['*']) === false,
+    '拒绝通配符 —— 那等于悄悄关掉 DNS rebinding 防护（要放开就绑 0.0.0.0，那条降级路径会明说风险）')
+  const proxyOpts = { requireLoopback: true, port: 3080, allowedHosts: ['dsh.example.com'] }
+  check(fenceReason({ headers: { host: 'dsh.example.com' }, method: 'GET' }, proxyOpts) === null,
+    '反向代理部署：白名单内的 Host 放行（否则面板在代理后面会 403）')
+  check(fenceReason({ headers: { host: 'dsh.example.com', 'sec-fetch-site': 'cross-site' }, method: 'GET' }, proxyOpts) !== null,
+    '白名单只放宽 Host 判定，跨站仍然拒绝')
+
+  // 绑 0.0.0.0 时如实降级：Host 无法判定，但仍挡跨站
+  const lanOpts = { requireLoopback: false, port: 3080 }
+  check(fenceReason({ headers: { host: '192.0.2.9:3080' }, method: 'GET' }, lanOpts) === null,
+    '绑 0.0.0.0 时不再强制回环（有意对外服务的部署不能被误伤）')
+  check(fenceReason({ headers: { host: '192.0.2.9:3080', 'sec-fetch-site': 'cross-site' }, method: 'GET' }, lanOpts) !== null,
+    '绑 0.0.0.0 时仍然拒绝跨站请求')
+
+  // ── 端到端：拒绝要真的**没有副作用**，并且要有反向对照 ────────────────────
+  await run('shell_open', { name: 'fence-test' })
+  const marker = '/tmp/dsh-fence-pwned-' + String(process.pid)
+  try { rmSync(marker, { force: true }) } catch { /* 忽略 */ }
+
+  const attack = await call('/keys', 'POST',
+    { name: 'dsh-fence-test', text: `touch ${marker}`, keys: ['Enter'] },
+    { 'sec-fetch-site': 'cross-site' })
+  check(attack.code === 403, `跨站 POST /keys 被拒绝 → HTTP ${attack.code}`)
+  await new Promise((r) => setTimeout(r, 600))
+  check(!existsSync(marker), `被拒绝的请求**没有执行**（${marker} 不存在）—— 这条是「挡住」与「只是报错」的区别`)
+
+  // 反向对照：同样的请求、只去掉攻击头 → 必须成功并真的执行。
+  // 没有这一步就无法证明「是闸门挡下的」而不是「命令本身没跑起来」。
+  const legit = await call('/keys', 'POST', { name: 'dsh-fence-test', text: `touch ${marker}`, keys: ['Enter'] })
+  check(legit.code === 200, `同样的请求去掉攻击头就放行 → HTTP ${legit.code}`)
+  await new Promise((r) => setTimeout(r, 800))
+  check(existsSync(marker), `放行的那次**真的执行了**（${marker} 已创建）—— 反向对照成立`)
+  try { rmSync(marker, { force: true }) } catch { /* 忽略 */ }
+  await run('shell_close', { session: 'dsh-fence-test' })
+
+  // 面板要能看见闸门形态与被拒记录（否则「面板突然打不开」无从查起）
+  const fenced = (await call('/list', 'GET')).body.server
+  check(fenced.fence !== null && fenced.fence.authority === 'local',
+    `闸门形态如实上报：${JSON.stringify(fenced.fence)}`)
+  check(Array.isArray(fenced.fenceBlocked) && fenced.fenceBlocked.length >= 1,
+    `被拒请求有记录可查：${JSON.stringify(fenced.fenceBlocked.slice(-1))}`)
+  const diagFence = await run('shell_diagnose', {})
+  check(diagFence.includes('浏览器面闸门'), 'shell_diagnose 报告闸门状态')
+}
+
+/* ── 7.7 配置值 → shell 注入：socket 名会被拼进 sh -c ────────────────────────── */
+
+{
+  const { shQuote, sanitizeSocketName, TmuxDriver } = await import(join(h.pkgDir, 'lib', 'tmux.js'))
+  check(typeof shQuote === 'function' && typeof sanitizeSocketName === 'function', 'shQuote / sanitizeSocketName 已导出')
+
+  check(shQuote('dsh-agent') === "'dsh-agent'", 'shQuote：普通值')
+  check(shQuote("a'b") === "'a'\\''b'", `shQuote：单引号被正确转义 → ${shQuote("a'b")}`)
+  const nasty = shQuote('x; rm -rf /tmp/x $(id) `id`')
+  check(nasty.startsWith("'") && nasty.endsWith("'") && !nasty.slice(1, -1).includes("'"),
+    `shQuote：注入字符全部被包进单引号 → ${nasty}`)
+
+  check(sanitizeSocketName('dsh-agent') === 'dsh-agent', 'sanitize：合法名不变')
+  check(sanitizeSocketName('a; touch /tmp/pwned') === 'atouchtmppwned',
+    `sanitize：注入字符被剔除 → ${sanitizeSocketName('a; touch /tmp/pwned')}`)
+  check(sanitizeSocketName('../../etc/passwd') === '....etcpasswd', `sanitize：路径穿越符被剔除 → ${sanitizeSocketName('../../etc/passwd')}`)
+  check(sanitizeSocketName('') === 'dsh-agent' && sanitizeSocketName('...') === 'dsh-agent', 'sanitize：空/退化值退回默认名')
+
+  // 真跑一次：用恶意 socket 名生成服务端配置（会真的执行 sh -c），断言注入没有发生
+  const victim = '/tmp/dsh-inject-victim-' + String(process.pid)
+  try { rmSync(victim, { force: true }) } catch { /* 忽略 */ }
+  const evil = new TmuxDriver({
+    subprocess: h.subprocess, timer: h.timer,
+    socket: `dsh-agent; touch ${victim} #`, historyLimit: 1000, shell: 'bash',
+    defaultTerminal: 'tmux-256color', cwd: '/', pidFile: `/tmp/dsh-agent; touch ${victim} #-watchdog.pid`,
+  })
+  check(evil.socket === 'dsh-agenttouch' + String(victim).replace(/[^A-Za-z0-9._-]/g, ''),
+    `恶意 socket 名被收敛后才使用 → ${evil.socket}`)
+  check(evil.socketRewrittenFrom !== '', '驱动记录了「原值被改写」，供上层如实提示')
+  await evil.writeServerConfig()
+  await new Promise((r) => setTimeout(r, 300))
+  check(!existsSync(victim), `注入没有执行（${victim} 不存在）—— 修复前这里会创建文件`)
+  try { rmSync(evil.confFile, { force: true }) } catch { /* 忽略 */ }
+
+  // 插件层：配置里写恶意 socket 时，面板要如实说明「名被改写过」
+  const h3 = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-inj`,
+    config: { socket: 'bad;name', watchdog: false },
+  })
+  const injList = (await h3.call('/list', 'GET')).body.server
+  check(injList.socket === 'badname', `插件层同样收敛 → ${injList.socket}`)
+  check(String(injList.socketNote).includes('收敛') && String(injList.socketNote).includes('bad;name'),
+    `面板如实报告原值：${injList.socketNote}`)
+  h3.cleanup()
 }
 
 /* ── 7.8 使用策略：别随手用持久化 shell ─────────────────────────────────────── */

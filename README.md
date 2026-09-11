@@ -24,7 +24,9 @@
 * **唯一的防线是启发式护栏**（`guardDangerousCommands`，默认开）：10 条正则匹配
   `rm -rf /`、`mkfs`、`dd of=/dev/*`、`sudo` 等文本。**可被拼接、变量、脚本文件轻易绕过，也会误报。**
   它是减速带，不是防护措施。
-* **HTTP 端点无独立鉴权**，面板走的就是这条同源 HTTP 通道。
+* **HTTP 端点无独立鉴权**，面板走的就是这条同源 HTTP 通道。已加**浏览器面闸门**挡住三条真实可达的
+  攻击路径（跨站请求伪造 / DNS rebinding / 写请求非 JSON），但**它不是鉴权**：本机其它进程仍可驱动
+  这些 shell。详见 [SECURITY.md](./SECURITY.md) 第 1 与第 8 条。
 * 面板状态行上的 **`无审批`** 标记是如实告知，不是开关。
 
 | 场景 | 建议 |
@@ -102,8 +104,9 @@ dsh plugin --profile web add dsh-agent-shell    # 或 file:/path/to/dsh-agent-sh
     extendedKeys: true      # 需要 tmux ≥ 3.2，改完要重启
 ```
 
-14 个参数：`socket` `httpBase` `exposeHttp` `exposeTools` `watchdog` `shell` `defaultTerminal`
-`cols` `rows` `historyLimit` `maxSessions` `defaultCwd` `guardDangerousCommands` `extendedKeys`。
+15 个参数：`socket` `httpBase` `exposeHttp` `exposeTools` `watchdog` `shell` `defaultTerminal`
+`cols` `rows` `historyLimit` `maxSessions` `defaultCwd` `guardDangerousCommands` `allowedHosts`
+`extendedKeys`。
 **哪些立即生效、哪些要重启**在设置页的字段说明里逐条写明，插件也会在改完后如实回报
 （「已保存，并已立即生效」/「下列项要重启 dsh web 才生效：historyLimit」），面板的 ⓘ 详情能看到。
 设置页里填越界值会被**当场拒绝并给出范围**（例如 `cols 必须在 20–1000 之间（现在是 5000）`），
@@ -180,7 +183,10 @@ shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "ke
 
 ## HTTP 端点
 
-面板用它，你也可以用（同源、`127.0.0.1`、**无独立鉴权**）：
+面板用它，你也可以用（同源、`127.0.0.1`、**无独立鉴权**）。**经浏览器调用时**要满足闸门要求：
+`Host` 为回环且端口一致、不带 `Sec-Fetch-Site: cross-site`、`Origin` 与 `Host` 同源、
+写请求带 `Content-Type: application/json`。用 `curl` 之类的本机工具直接调不受影响（但仍请勿把
+端口暴露到不可信网络）：
 
 ```
 GET  /plugins/shell/list                     会话列表 + 服务端信息（含 approval 情报）
@@ -203,11 +209,48 @@ GET  /plugins/shell/diagnose
 * `sudo -i` 这类登录 shell 里 `pane_current_command` 会一直是 `sudo`，状态点不会回到空闲。
 * 只看得到本插件自己创建的 shell（有意设计）：不枚举默认 socket，也接不进你已有的 tmux 会话。
 * **宿主停机超过约 6 秒**时，全部 shell 会被孤儿看门狗收掉（崩溃、慢重启属于这一类）。
+* **HTTP 服务绑到 `0.0.0.0` 时闸门会降级**：`Host` 无法用于判定是否本机，DNS rebinding 那条路径
+  不再被挡住。面板 ⓘ 的「浏览器面闸门」会以 `⚠` 明确标出。
 
 ## 更新与修复记录
 
 这里是**全部**改动记录，每条都写明**根因**与**验证方式** —— 只写「修了什么」而不写「为什么坏、
 怎么确认修好了」，下次还会踩同一个坑。逐版本的发布说明另见 [CHANGELOG.md](./CHANGELOG.md)。
+
+### 未发布（下一个版本）
+
+#### 安全
+
+从「权限太大」这个疑问出发，把攻击面按**可达路径**逐条过了一遍（不再是笼统的清单），修掉两个真问题：
+
+- **跨站请求伪造（可被任意网页打成远程命令执行）**：面板的 HTTP 路由在 `127.0.0.1` 上、
+  无鉴权，而我访问的任意网页都可以 `fetch('http://127.0.0.1:3080/plugins/shell/keys', …)`。
+  修复前的关键缺口是**请求体解析完全不看 `Content-Type`**：跨站「简单请求」（`text/plain`、表单）
+  不触发预检，响应虽然读不到，但**命令已经执行**。现在：拒绝 `Sec-Fetch-Site: cross-site`、
+  `Origin` 必须与 `Host` 同源（含拒绝 `Origin: null`）、**写请求必须是 `application/json`**
+  （强制预检，而本插件不返回任何 CORS 头 → 浏览器发不出去）。
+- **DNS rebinding（可读走终端内容并写入）**：攻击者域名解析到 `127.0.0.1`，浏览器视为同源即可读写。
+  现在 `Host` 必须是回环地址且端口等于实际监听端口。
+- **配置值 → 命令注入**：`socket` 名会被派生成 `/tmp/<name>-tmux.conf` 与 `-watchdog.pid`，
+  而这两个路径此前**无引号**拼进 `sh -c`（6 处）—— 名为 `dsh; rm -rf ~ #` 的 socket 就是注入。
+  现在 `socket` 在解析处收敛到 `[A-Za-z0-9._-]`，且所有 shell 插值统一单引号转义；被改写时
+  面板与诊断**如实说明原值**（静默改名会让人找不到自己的会话）。
+- 闸门在**路由注册处统一包裹**：以后新增路由不可能忘记防护（纵深防御靠结构，不靠自觉）；
+  若部署挂了 DSH 的 `connection` 服务则优先采用它的 Host/Origin 围栏与浏览器会话校验
+  （那条能连「本机其它进程」一起收口），没有则用本地等价实现。
+- 如实公开**降级路径**：服务绑到 `0.0.0.0` 时 `Host` 无法判定是否本机，闸门降级并在面板上以 `⚠`
+  标出；「本机其它进程能驱动这些 shell」属于**接受的风险**（端点本身等价于本机 shell 权限），
+  已写进 `SECURITY.md` 第 1 与第 8 条，不再含糊。
+- 新增 `allowedHosts` 配置（默认空）：闸门默认只信回环 `Host`，而**反向代理部署**（`SECURITY.md`
+  自己推荐的加固方式）转发过来的 `Host` 正是别的域名 —— 不处理就会把面板自己关在门外。
+  白名单只放宽 `Host` 判定，跨站/JSON 两条检查照旧；不接受 `*`（那等于悄悄关掉防护），
+  条目形状由设置页校验，改完**立即生效**。
+- 面板 ⓘ 新增「**浏览器面闸门**」一行（谁在把关、绑定地址、被拒次数、降级警告），
+  被拒的请求会留记录 —— 否则「面板突然打不开」无从查起。
+
+测试新增 39 项断言（宿主侧），其中最关键的是**反向对照**：同一个 `POST /keys`，带攻击头 → `403`
+且**命令没有执行**；去掉攻击头 → `200` 且命令真的执行 —— 这才证明「是闸门挡下的」，而不是
+「命令本身没跑起来」。另外用恶意 socket 名**真跑一次** `sh -c`，断言注入标记文件没有生成。
 
 ### 0.1.3 — 发布链路自动化：推 tag 即发布（带 provenance）
 

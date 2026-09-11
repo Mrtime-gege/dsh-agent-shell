@@ -141,7 +141,13 @@ const timer = { timeout: (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 const tools = new Map()
 const routes = new Map()
-const webServer = { register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) } }
+// 真 webServer 有 host/port getter（闸门据此判断是否本机），冒烟桩同样提供，
+// 这样冒烟走的是**和面板一致**的请求形状 —— 否则闸门会（正确地）把它当成本机之外的东西拦掉。
+const webServer = {
+  host: '127.0.0.1',
+  port: 3080,
+  register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) },
+}
 const effect = (cb) => cb()
 const ctx = {
   get: (name) => ({ subprocess, timer })[name],
@@ -163,7 +169,9 @@ const call = async (path, method, body) => {
   const routePath = `${BASE}${path.split('?')[0]}`
   const handler = routes.get(routePath)
   if (handler === undefined) throw new Error(`路由不存在：${routePath}`)
-  const req = { url: path, method, headers: {}, socket: { remoteAddress: '127.0.0.1' }, on: () => {}, destroy () {} }
+  const reqHeaders = { host: '127.0.0.1:3080' }
+  if (method !== 'GET') reqHeaders['content-type'] = 'application/json'
+  const req = { url: path, method, headers: reqHeaders, socket: { remoteAddress: '127.0.0.1' }, on: () => {}, destroy () {} }
   if (method !== 'GET') {
     req.on = (ev, fn) => {
       if (ev === 'data') fn(Buffer.from(JSON.stringify(body ?? {})))
