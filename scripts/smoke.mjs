@@ -256,7 +256,11 @@ const driver = new TmuxDriver({
   pidFile,
 })
 
-// (1) 认 harness：必须落在本进程的祖先链上，绝不能是无关进程。
+// 这些断言需要「有一个活着的 harness 祖先」才能完整验证：CI 的 runner 上没有任何 dsh
+// 进程，harnessPid() 会返回空串，看门狗也就布不了防。那种环境下只保留不依赖 harness 的部分，
+// 并明确打印跳过原因 —— 不允许静默通过。
+
+// (1) 认 harness：必须是空串，或落在本进程的祖先链上；绝不能是无关进程。
 //     旧实现靠「祖先 cmdline 里第一个含 dsh 的进程」匹配，实测会被任何命令行提到 dsh
 //     的中间进程骗到（真踩过：一条含 "dsh" 字样的 bash 命令被当成了 harness）。
 const ancestorChain = []
@@ -269,8 +273,13 @@ const ancestorChain = []
   }
 }
 const harness = await driver.harnessPid()
-check(/^[0-9]+$/.test(harness), `harnessPid() 返回了 pid：${harness || '(空)'}`)
-check(ancestorChain.includes(harness), `harnessPid() 落在本进程祖先链上（不是无关进程）：${harness}`)
+const hasHarness = /^[0-9]+$/.test(harness)
+if (hasHarness) {
+  check(ancestorChain.includes(harness), `harnessPid() 落在本进程祖先链上（不是无关进程）：${harness}`)
+} else {
+  console.log('  · 当前环境没有 harness 祖先（独立运行/CI）：harnessPid() 返回空串，与预期一致')
+  check(harness === '', `harnessPid() 返回空串而不是无关进程：${JSON.stringify(harness)}`)
+}
 
 // (2) pid 文件记着「别的 harness」+ 服务端上有活会话 → 必须收养，不许清
 await run('shell_open', { name: 'keepme', cols: 80, rows: 24 })
@@ -279,18 +288,23 @@ const boot = await driver.bootstrap()
 const kept = await call('/list', 'GET')
 check(boot.adopted === false && boot.kept.length >= 1, `bootstrap 报告保住了 ${boot.kept.length} 个会话`)
 check(kept.body?.sessions?.length === 1, `pid 文件指向别的 harness 时，会话仍在（${kept.body?.sessions?.length} 个）`)
-check(boot.watchdogPid !== '', `重新布防了看门狗：pid ${boot.watchdogPid}`)
+if (hasHarness) check(boot.watchdogPid !== '', `重新布防了看门狗：pid ${boot.watchdogPid}`)
+else console.log('  · 无 harness 祖先，跳过「看门狗已重新布防」断言（布防本就无法进行）')
 await run('shell_close', { session: 'dsh-keepme' })
 
 // (3) 看门狗静默死亡 → 下一次操作必须自愈重布防（节流窗口 5 秒，故先等过去）
-await driver.disarmWatchdog()
-check(await driver.watchdogPid() === '', '看门狗已停掉（模拟静默死亡）')
-await new Promise(r => setTimeout(r, 5200))
-await run('shell_list', {})
-await new Promise(r => setTimeout(r, 1000))
-const rearmed = await driver.watchdogPid()
-check(rearmed !== '', `自愈生效：看门狗重新布防为 pid ${rearmed || '(无)'}`)
-await driver.disarmWatchdog()
+if (hasHarness) {
+  await driver.disarmWatchdog()
+  check(await driver.watchdogPid() === '', '看门狗已停掉（模拟静默死亡）')
+  await new Promise(r => setTimeout(r, 5200))
+  await run('shell_list', {})
+  await new Promise(r => setTimeout(r, 1000))
+  const rearmed = await driver.watchdogPid()
+  check(rearmed !== '', `自愈生效：看门狗重新布防为 pid ${rearmed || '(无)'}`)
+  await driver.disarmWatchdog()
+} else {
+  console.log('  · 无 harness 祖先，跳过看门狗自愈断言')
+}
 
 // (4) 看门狗脚本的两个关键修正（静态断言，防止以后被改回去）
 const tmuxSrc = readFileSync(join(pkgDir, 'lib', 'tmux.js'), 'utf8')
