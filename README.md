@@ -149,8 +149,8 @@ config:
   watchdog: true                        # 脱离进程树的孤儿看门狗
   shell: bash                           # 每个会话启动的程序
   defaultTerminal: tmux-256color        # 写进服务端启动配置的 TERM
-  cols: 120                             # 新会话默认列数
-  rows: 32                              # 新会话默认行数
+  cols: 120                             # 新会话默认列数（夹到 20–1000）
+  rows: 32                              # 新会话默认行数（夹到 5–500）
   historyLimit: 100000                  # 每会话滚动缓冲上限（行）
   maxSessions: 8                        # 同时在世的会话数上限
   defaultCwd: ''                        # 新会话起始目录；留空取 $HOME
@@ -297,14 +297,14 @@ shell_read  { "session": "dsh-build" }
 
 | 工具 | 参数（★ = required） | 作用 |
 |---|---|---|
-| `shell_open` | `name?` `cols?` `rows?` `cwd?` | 新建后台 shell，返回首屏 |
+| `shell_open` | `name?` `cols?` `rows?` `cwd?` | 新建后台 shell，返回首屏（`cwd` 不存在会明确报错，不会静默换目录） |
 | `shell_send` | ★`session` `text?` `preKeys?` `keys?` `confirm?` `settleMs?` | 像人一样输入：`preKeys` → `text` → `keys`，一次调用可完成「进插入模式→打字→退出」 |
 | `shell_read` | ★`session` | 读当前可见屏 |
 | `shell_history` | ★`session` `lines?` | 读滚动缓冲（滚出屏幕的输出） |
 | `shell_list` | — | 列出全部 shell 与指标 |
 | `shell_resize` | ★`session` ★`cols` ★`rows` | 改尺寸 |
 | `shell_rename` | ★`session` ★`newName` | 重命名 shell（自动净化名字并补 `dsh-` 前缀） |
-| `shell_close` | ★`session` | 关闭 |
+| `shell_close` | ★`session` | 关闭（**幂等**：已经没了也返回成功，并说明没关到） |
 | `shell_diagnose` | — | 服务端 / 看门狗 / 起始目录状态 |
 
 `shell_send` 的 `preKeys` / `keys` 收的是 tmux 键名（`Escape`、`C-c`、`Enter`、`Up`…），
@@ -426,10 +426,21 @@ tmux 服务端会 setsid 并 reparent，**harness 退出时的托管进程清理
 
 ```sh
 npm run check          # node --check 三个文件（语法）
+npm test               # 客户端纯函数 + 宿主边界与错误路径（下面两行）
+npm run test:client    # 51 条断言：keydown 判定与输入法组字状态机（零依赖，永远可跑）
+npm run test:edge      # 67 条断言：参数边界/错误路径/护栏/HTTP 畸形输入（需 peer + tmux）
+npm run smoke          # 打包产物冒烟：解包 → 假 ctx → 真实 tmux 跑通主流程（需 peer + tmux）
 npm run release:check  # 发版不变量：版本/CHANGELOG/files 白名单/peer/泄漏/客户端形态
-npm run smoke          # 打包产物冒烟测试：解包 → 假 ctx → 真实 tmux 跑一遍（见下）
 scripts/dev-sync.sh    # 把源码同步到 profile 的安装位置
 ```
+
+三层测试各管一段，缺一层就会漏掉一类问题：
+
+| 测试 | 管什么 | 需要什么 |
+|---|---|---|
+| `test:client` | 面板里最容易写错、最难复现的两块纯逻辑（按键判定、输入法组字），含三种浏览器事件顺序 | 无（连 React 与 tmux 都不需要） |
+| `test:edge` | 输入边界与错误路径：名字净化、尺寸夹取、不存在的会话/目录、护栏真阳假阳、HTTP 畸形请求 | peer + tmux |
+| `smoke` | 真实打包产物的主流程与生命周期（收养/自愈） | peer + tmux |
 
 必须同步的原因：pnpm 对 `file:` 依赖是**拷贝**而非符号链接；而符号链接又行不通 ——
 Node 的 ESM 解析走 realpath，一旦链到本包目录，插件自己的 `@deepseek-ai/*` 依赖就解析不到了

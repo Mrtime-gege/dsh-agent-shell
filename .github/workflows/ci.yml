@@ -50,6 +50,11 @@ jobs:
           node -v
           npm run check
 
+      # 客户端纯函数测试零依赖（不需要 tmux、不需要 peer），所以放在这个 job 里，
+      # 即使下面的 peer 安装失败也仍然有测试覆盖。
+      - name: 客户端纯函数测试（输入法/keydown 判定）
+        run: npm run test:client
+
       - name: 发布不变量检查
         run: npm run release:check
 
@@ -92,3 +97,9 @@ jobs:
         env:
           SMOKE_REQUIRE: '1'
         run: npm run smoke
+
+      - name: 边界与错误路径测试
+        if: steps.tmux.outcome == 'success' && steps.peers.outcome == 'success'
+        env:
+          SMOKE_REQUIRE: '1'
+        run: npm run test:edge

@@ -41,6 +41,9 @@
   },
   "scripts": {
     "check": "node --check lib/index.js && node --check lib/tmux.js && node --check lib/client.js",
+    "test:client": "node scripts/test-client.mjs",
+    "test:edge": "node scripts/test-edge.mjs",
+    "test": "node scripts/test-client.mjs && node scripts/test-edge.mjs",
     "release:check": "node scripts/release-check.mjs",
     "prepublishOnly": "npm run check && npm run release:check",
     "smoke": "node scripts/smoke.mjs"
