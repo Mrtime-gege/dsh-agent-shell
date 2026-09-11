@@ -209,6 +209,22 @@ GET  /plugins/shell/diagnose
 这里是**全部**改动记录，每条都写明**根因**与**验证方式** —— 只写「修了什么」而不写「为什么坏、
 怎么确认修好了」，下次还会踩同一个坑。逐版本的发布说明另见 [CHANGELOG.md](./CHANGELOG.md)。
 
+### 0.1.3 — 发布链路自动化：推 tag 即发布（带 provenance）
+
+- **发布改成「推 tag → CI 自动发」**：配好 npm **Trusted Publisher**（`npm trust github …`），
+  仓库里**不再需要 `NPM_TOKEN`** —— 没有长期密钥可泄漏。日常只需要在 GitHub 维护一个版本：
+  改代码 → 写进 CHANGELOG 的 `## 未发布` 与 README 的记录 → 改三处版本号 → 推 tag，剩下的
+  发布与 GitHub Release 由 CI 完成。
+- **升级：从本版起带 provenance 签名**。0.1.0 ~ 0.1.2 都是本地手工发布（`dist.attestations`
+  为「无」），本版起为「有」，可以用 `npm audit signatures` 验证「这个包确实由这个仓库的这个
+  commit 构建」。**`npm view dsh-agent-shell@<版本> dist.attestations` 一条命令就能分辨
+  某次发布是 CI 发的还是手工发的** —— 也就等于确认自动化没有退化成手工。
+- 本版是这条链路的**第一次真实发布**，用来验证而不是声称：`release.yml` 的 OIDC 步骤会先写
+  一份干净的 userconfig（`actions/setup-node` 的 `_authToken=${NODE_AUTH_TOKEN}` 占位符会让
+  npm 以为要走 token 认证，这是 OIDC 发布最常见的坑），配上信任关系后才真正走通。
+- `PUBLISHING.md` 按新链路重写（4.1 默认路线 / 4.2 兜底 / 4.3 验证含 attestations / 4.4 网页
+  等价操作与「workflow 文件名对不上只会 403/404」这个坑）。
+
 ### 0.1.2 — 设置页真正可用（并修掉一个静默失效）
 
 #### 修复

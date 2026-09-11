@@ -17,9 +17,9 @@
 | git 身份 | 用于 commit 署名 | `git config user.name && git config user.email` |
 | GitHub | 账号；有 `gh` CLI 更省事 | `gh auth status` |
 
-> npm 现在对发布强制要求 **2FA**：`npm publish` 会要一次性验证码（OTP）。
-> 如果你在 CI 里发布，用 **Trusted Publisher**（推荐，见 [4.4](#44-可选但推荐在-npm-上绑定-trusted-publisher)）
-> 或粒度 access token，不要用账号密码。
+> npm 现在对发布强制要求 **2FA**：手工 `npm publish` 会要一次性验证码（OTP）。
+> **本仓库已改用 Trusted Publisher**（见 [4.1](#41-路线-atrusted-publisher--oidc--本仓库已配置默认路线)）：
+> 推 tag 由 CI 用 OIDC 身份发布，既不需要 OTP，也不需要长期 token。
 
 **npm 与 GitHub 的关系**：两者互相独立。GitHub 放源码，npm 放可分发的包。
 本指南两条都做，npm 上的 `repository` 字段会让 npm 页面显示「源码在 GitHub」。
@@ -184,18 +184,45 @@ tag 名必须是 **`v<package.json 里的 version>`**：`release.yml` 会校验�
 有两条路：CI 自动发（推荐，带 provenance）和本地手工发（第一次最直观）。
 **任选一条**，不要对同一个版本两条都跑（会撞 `E403: cannot publish over existing version`）。
 
-### 4.1 路线 A：GitHub Actions 自动发布（推荐）
+### 4.1 路线 A：Trusted Publisher / OIDC —— **本仓库已配置，默认路线**
 
-1. 在 npm 上创建 **Granular Access Token**：npmjs.com → Access Tokens → Generate New Token →
-   **Granular**，权限选 `Read and write`，**Packages 限定为 `dsh-agent-shell`**，有效期尽量短。
-2. GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret，
-   名字填 **`NPM_TOKEN`**，值粘贴上一步的 token。
-3. 推送 tag（3.3），工作流自动完成发布与 Release 创建。
+**推一个 tag 就完事了**，CI 用 OIDC 身份发布，仓库里**不需要任何长期密钥**（没有
+`NPM_TOKEN` 可泄漏），并且**自动带 provenance 签名**。
 
-CI 发布的最大好处是 **provenance**：npm 页面会显示「由 GitHub Actions 在某个 commit 上构建」，
-用户可以用 `npm audit signatures` 验证。**手工发布没有这个。**
+本仓库当前状态（2026-09 配置）：
 
-### 4.2 路线 B：手工发布（本地 `npm publish`）
+```
+package: dsh-agent-shell
+type: github   file: release.yml   repository: Mrtime-gege/dsh-agent-shell
+permissions: publish, stage publish
+id: 075d17aa-972e-4d5e-a421-8d7fda9ce481
+```
+
+本仓库**没有**配 `NPM_TOKEN` secret —— 这正是信任发布生效的证明（工作流会打印
+「未配置 NPM_TOKEN，改走 Trusted Publisher（OIDC）发布」）。所以：**不要**为了「图省事」
+再手工 `npm publish` 一个已经推过 tag 的版本，那样会绕过签名。
+
+配置命令（npm ≥ 11.6 提供 `npm trust`，一次配置长期有效，需要一次 2FA 授权）：
+
+```sh
+npm trust github dsh-agent-shell \
+  --file release.yml \
+  --repo Mrtime-gege/dsh-agent-shell \
+  --allow-publish
+
+npm trust list dsh-agent-shell          # 查看现有信任关系
+npm trust revoke dsh-agent-shell --id=<trust-id>   # 撤销
+```
+
+> 为什么值得切过来：`release.yml` 的 OIDC 步骤会先写一份**干净的 userconfig**（只留 registry，
+> 不出现任何 `_authToken` 行）—— `actions/setup-node` 生成的 `_authToken=${NODE_AUTH_TOKEN}`
+> 占位符会让 npm 以为要用 token 认证，那是 OIDC 发布最常见的坑。
+
+### 4.2 路线 B：手工发布（本地 `npm publish`，仅在 CI 不可用时兜底）
+
+本账号是**写入强制 2FA**，所以本地发布会弹一次浏览器授权（npm 会打印一个
+`https://www.npmjs.com/auth/cli/<id>` 链接）。0.1.0 / 0.1.1 都是这样发的 ——
+代价是**没有 provenance 签名**，所以现在只当作兜底路径。
 
 ```sh
 npm login            # 浏览器/OTP 流程；npm 12 默认走 web 登录
@@ -212,13 +239,21 @@ npm publish              # package.json 里 publishConfig.access=public，不用
 ### 4.3 发布后立刻验证（不要只看「成功」两个字）
 
 ```sh
-npm view dsh-agent-shell version                 # 期望 0.1.0
-npm view dsh-agent-shell dist-tags               # latest 指向 0.1.0（预发布则看 next）
-npm view dsh-agent-shell files --json            # 期望看到 lib/ 与 cordis.patch.yml
+V=0.1.3
+npm view dsh-agent-shell version                  # 期望就是 $V
+npm view dsh-agent-shell dist-tags                # latest 指向 $V（预发布则看 next）
+npm view dsh-agent-shell files --json             # 期望看到 lib/ 与 cordis.patch.yml
+
+# OIDC 发布的**关键证据**：必须有 attestations（手工发布是「无」）
+npm view dsh-agent-shell@$V dist.attestations --json
+npm audit signatures                              # 本地校验签名链
 
 mkdir -p /tmp/pkgcheck && cd /tmp/pkgcheck
-npm pack dsh-agent-shell@0.1.0 && tar -tzf dsh-agent-shell-0.1.0.tgz | head -20
+npm pack dsh-agent-shell@$V && tar -tzf dsh-agent-shell-$V.tgz | head -20
 ```
+
+**一条命令分辨「这次是谁发的」**：`dist.attestations` 为「有」= CI 通过 Trusted Publisher
+发的（带 provenance）；为「无」= 有人手工发的。发版后顺手看一眼，等于确认自动化没有退化成手工。
 
 最后做一次**真实安装**验证（这是唯一能证明 patch 与客户端产物都在包里的办法）：
 
@@ -227,42 +262,48 @@ dsh plugin --profile web add dsh-agent-shell@0.1.0
 # 重启 dsh web，确认：右下角出现胶囊；面板指标行显示 v0.1.0
 ```
 
-### 4.4 （可选但推荐）在 npm 上绑定 Trusted Publisher
+### 4.4 Trusted Publisher 也可以从网页配（等价做法）
 
-绑定之后，CI 用 **OIDC** 直接发布，**不再需要 `NPM_TOKEN`**，也就没有长期密钥可泄漏：
+命令行不方便时，用网页等价操作：npm 包页面 → **Settings → Trusted Publisher** → 选
+**GitHub Actions** → 填组织/用户名、仓库名 `dsh-agent-shell`、workflow 文件名 `release.yml`
+→ 保存。两种方式改的是同一份配置。
 
-1. npm 包页面 → Settings → **Trusted Publisher** → 选 GitHub Actions；
-2. 填组织/用户名、仓库名 `dsh-agent-shell`、workflow 文件名 `release.yml`（本仓库已就绪）；
-3. 之后可以把仓库 Secret 里的 `NPM_TOKEN` 删掉，`release.yml` 里已具备
-   `id-token: write` 权限，无需改动。
-
-> 绑定只对**新版本**生效，已发布的旧版本不受影响。
+> 两处必须一致：**workflow 文件名**（`release.yml`）与**仓库全名**（`Mrtime-gege/dsh-agent-shell`）。
+> 名字对不上时 CI 会以 `403`/`404` 失败，报错不会点名是这里配错了 —— 而路线 B 的手工发布
+> 完全不受影响，所以这种错很容易被误判成「npm 抽风」。改过工作流文件名的话，记得同步这里。
 
 ---
 
 ## 5. 每个版本的发布清单
 
+**现在只有「推 tag」这一步是必须人工触发的**，其余全自动。日常改动写进 CHANGELOG 的
+`## 未发布` 一节与 README 的「更新与修复记录」；发版时把它变成版本号：
+
 ```sh
-# 1. 改代码、跑检查
+V=0.1.4
+# 1. 改代码 → 日常自查
 npm run check && npm run release:check
 
-# 2. 定版本（三处同步：package.json / CHANGELOG.md / lib/client.js 的 PKG_VERSION）
-npm version patch --no-git-tag-version
-$EDITOR CHANGELOG.md
-$EDITOR lib/client.js            # 只改 PKG_VERSION 那一行
+# 2. 定版本：三处必须同步（package.json / CHANGELOG.md / lib/client.js 的 PKG_VERSION）
+#    release:check 会机械校验这三者一致，漏了会直接 fail
+npm version "$V" --no-git-tag-version
+sed -i "s/const PKG_VERSION = '[^']*'/const PKG_VERSION = '$V'/" lib/client.js
+$EDITOR CHANGELOG.md             # 「## 未发布」→「## $V — 标题」
+$EDITOR README.md                # 「### 未发布（下一个版本）」→「### $V — 标题」
 npm run release:check            # 必须通过
 
-# 3. 提交并推到 GitHub
-git add -A && git commit -m "release: 0.1.1"
-git push
+# 3. 提交并推送
+git add -A && git commit -m "release: $V" && git push
 
-# 4. 打 tag 并推送（触发 CI 发布；若走手工路线则本地 npm publish）
-git tag -a v0.1.1 -m "0.1.1"
-git push origin v0.1.1
+# 4. 打 tag 并推送 —— 这一条命令就是「发布」的扳机
+git tag -a "v$V" -m "$V" && git push origin "v$V"
 
-# 5. 验证
-npm view dsh-agent-shell version
+# 5. 验证（等 CI 跑完，绿灯即已发布）
+npm view "dsh-agent-shell@$V" dist.attestations --json   # 期望：有
 ```
+
+> 工作流是**幂等**的：同一个 tag 重跑、或某个版本恰好在 npm 上已存在时，它会跳过发布，
+> 只补建 GitHub Release。所以「重推 tag」是安全的补救手段，而**不是**重发版本。
 
 ---
 

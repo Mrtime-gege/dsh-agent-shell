@@ -2,6 +2,21 @@
 
 本文件记录 `dsh-agent-shell` 的版本变化。
 
+## 0.1.3 — 发布链路自动化：推 tag 即发布（带 provenance）
+
+把发布从「本地 `npm publish` + 手工授权」改成 **推 tag → CI 用 OIDC 身份自动发布**。
+
+- 配好 npm **Trusted Publisher**（`npm trust github dsh-agent-shell --file release.yml
+  --repo Mrtime-gege/dsh-agent-shell --allow-publish`），仓库里**不再需要 `NPM_TOKEN`**
+  —— 没有长期密钥可泄漏，也就不存在密钥轮换这件事。
+- 副作用是升级：CI 发布会带上 **provenance 签名**。0.1.0 / 0.1.1 / 0.1.2 都是本地发布，
+  `dist.attestations` 为「无」；从本版起为「有」，任何人可以用 `npm audit signatures` 验证
+  「这个包确实由这个仓库的这个 commit 构建」。**一条命令就能分辨某次发布是 CI 发的还是手工发的。**
+- `PUBLISHING.md` 按新链路重写：4.1 变成默认路线（含本仓库的实际配置与 `npm trust` 命令）、
+  4.2 降级为兜底、4.3 增加「用 `dist.attestations` 判断这次是谁发的」、4.4 补上网页等价操作
+  以及**最容易踩的坑**（workflow 文件名或仓库名对不上时 CI 只会 403/404，报错不点明是这里配错）。
+- 本版就是这条链路的第一次真实发布 —— 不是「配好了应该能用」，而是**让 CI 真的发一次**。
+
 ## 0.1.2 — 设置页真正可用（并修掉一个静默失效）
 
 ### 新增
