@@ -412,6 +412,39 @@ if (typeof auditRowValue === 'function') {
 
 /* ── 真实光标：单元格坐标 → 字符下标 → 屏幕位置 ───────────────────────────── */
 
+/* ── 行高必须实测：从 scrollHeight 推会在"文本少"时把光标画偏 ───────────────── */
+
+const resolveLineHeight = plugin?.__resolveLineHeight
+check(typeof resolveLineHeight === 'function', 'resolveLineHeight 已暴露')
+
+if (typeof resolveLineHeight === 'function') {
+  check(resolveLineHeight({ lineHeight: '17.55px', fontSize: '13px' }) === 17.55, '计算样式给像素值 → 直接用')
+  check(resolveLineHeight({ lineHeight: '17.55', fontSize: '13px' }) === 17.55, '无单位的计算结果也认')
+  check(resolveLineHeight({ lineHeight: 'normal', fontSize: '13px' }) === 15.6,
+    'line-height:normal 时按字号 ×1.2 估（浏览器这时不给数值）')
+  check(resolveLineHeight({ lineHeight: '', fontSize: '' }) === 0, '量不出来返回 0 → 调用方不画（不猜行高）')
+  check(resolveLineHeight(null) === 0 && resolveLineHeight(undefined) === 0, '拿不到计算样式也返回 0')
+
+  // 把踩到的坑本身写成断言，防止以后有人"顺手"改回从 scrollHeight 推
+  const fromScrollHeight = (scrollHeight, padY, lines) => Math.max(0, scrollHeight - padY) / lines
+  check(fromScrollHeight(420, 20, 5) === 80,
+    '复现旧 bug：内容比视口矮时 scrollHeight = 视口高度(420) → 行高被算成 80px（真实约 17.5）')
+  check(fromScrollHeight(420, 20, 5) !== resolveLineHeight({ lineHeight: '17.55px' }),
+    '两种算法在"文本少"时结果不同 —— 这正是"文本少偏、文本多正常"的原因')
+  check(resolveLineHeight({ lineHeight: '17.55px' }) === resolveLineHeight({ lineHeight: '17.55px' }),
+    '实测行高与内容多少无关（这才是它该有的性质）')
+
+  // 滚动补偿同样要用实测行高，否则同样会被高估
+  const prev = Array.from({ length: 20 }, (_, i) => 'l' + i).join('\n')
+  const next = Array.from({ length: 20 }, (_, i) => 'l' + (i + 2)).join('\n')   // 顶部被挤掉 2 行
+  const view = { scrollTop: 500, clientHeight: 400, scrollHeight: 1000, padding: 20, pinned: false }
+  const withMeasured = plugin.__scrollAnchor(prev, next, { ...view, lineHeight: 20 })
+  const withoutMeasured = plugin.__scrollAnchor(prev, next, view)
+  check(withMeasured.scrollTop === 460, `给实测行高(20) → 补偿 2 行 = 40px：${withMeasured.scrollTop}`)
+  check(withoutMeasured.scrollTop === 402,
+    `不给实测行高时退回旧推导(49px/行) → 补偿 98px：${withoutMeasured.scrollTop}（正是被高估的那条路）`)
+}
+
 const charCellWidth = plugin?.__charCellWidth
 const cellsToCharIndex = plugin?.__cellsToCharIndex
 const caretPlacement = plugin?.__caretPlacement
