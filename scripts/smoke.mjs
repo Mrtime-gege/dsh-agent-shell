@@ -8,7 +8,8 @@
  *   2. 包在「不带自己的 node_modules、依赖靠上层解析」的真实形态下能 import；
  *   3. `apply()` 在假 ctx 上不抛错，且真的注册出 9 个工具与 8 条 HTTP 路由；
  *   4. 工具与 HTTP 两条路径都能驱动**真实 tmux**：建会话、发按键、读屏、改名、关闭；
- *   5. `extendedKeys` 之类的配置真的写进了服务端启动配置，且不影响服务端存活。
+ *   5. `extendedKeys` 之类的配置真的写进了服务端启动配置，且不影响服务端存活；
+ *   6. 生命周期保护：harness pid 认的是本进程、启动时**不会**误清用户会话、看门狗死了会自愈。
  *
  * 用法：
  *
@@ -100,7 +101,14 @@ const pkgDir = join(root, 'package')
 console.log(`peer 来自 ${peers}\n解包到 ${pkgDir}\n`)
 
 const cleanup = () => {
+  // 先把本次可能布防的看门狗收掉 —— 失败路径上不会走到显式 disarm，
+  // 漏掉它就会在开发机留一个永远在 sleep 的守护进程。
+  try {
+    const [watchdog] = readFileSync(`/tmp/${SOCKET}-watchdog.pid`, 'utf8').trim().split(/\s+/)
+    if (/^[0-9]+$/.test(watchdog ?? '')) process.kill(Number(watchdog), 'SIGTERM')
+  } catch { /* 没有 pid 文件就没有看门狗 */ }
   try { rmSync(root, { recursive: true, force: true }) } catch { /* 忽略 */ }
+  try { rmSync(`/tmp/${SOCKET}-watchdog.pid`, { force: true }) } catch { /* 忽略 */ }
   try { execFileSync('tmux', ['-L', SOCKET, 'kill-server'], { stdio: 'ignore' }) } catch { /* 已无服务端 */ }
   try { rmSync(`/tmp/${SOCKET}-tmux.conf`, { force: true }) } catch { /* 忽略 */ }
 }
@@ -180,7 +188,7 @@ const mod = await import(join(pkgDir, 'lib', 'index.js'))
 console.log(`导出：${Object.keys(mod).sort().join(', ')}\n`)
 check(mod.name === 'dsh-agent-shell', `插件名 = ${mod.name}`)
 
-mod.apply(ctx, { socket: SOCKET, httpBase: BASE, watchdog: false, exposeHttp: true, exposeTools: true, extendedKeys: true })
+mod.apply(ctx, { socket: SOCKET, httpBase: BASE, watchdog: true, exposeHttp: true, exposeTools: true, extendedKeys: true })
 
 check(tools.size === 9, `注册工具数 = ${tools.size}（期望 9）`)
 check(routes.size === 8, `注册 HTTP 路由数 = ${routes.size}（期望 8）`)
@@ -231,6 +239,63 @@ check(viaHttp.body?.name === 'dsh-http2', `POST /rename → ${viaHttp.body?.name
 
 check((await run('shell_close', { session: 'dsh-renamed' })).includes('closed'), 'shell_close 生效')
 check((await run('shell_close', { session: 'dsh-http2' })).includes('closed'), 'shell_close 第二个会话')
+
+/* ---------- 生命周期保护 ---------- */
+
+const { TmuxDriver } = await import(join(pkgDir, 'lib', 'tmux.js'))
+const pidFile = `/tmp/${SOCKET}-watchdog.pid`
+const driver = new TmuxDriver({
+  subprocess,
+  timer,
+  socket: SOCKET,
+  historyLimit: 1000,
+  shell: 'bash',
+  defaultTerminal: 'tmux-256color',
+  extendedKeys: false,
+  cwd: '/',
+  pidFile,
+})
+
+// (1) 认 harness：必须落在本进程的祖先链上，绝不能是无关进程。
+//     旧实现靠「祖先 cmdline 里第一个含 dsh 的进程」匹配，实测会被任何命令行提到 dsh
+//     的中间进程骗到（真踩过：一条含 "dsh" 字样的 bash 命令被当成了 harness）。
+const ancestorChain = []
+{
+  let pid = String(process.pid)
+  for (let hops = 0; hops < 50 && pid !== '' && pid !== '0' && pid !== '1'; hops += 1) {
+    ancestorChain.push(pid)
+    const parent = execFileSync('sh', ['-c', `ps -o ppid= -p ${pid} 2>/dev/null | tr -d ' '`], { encoding: 'utf8' }).trim()
+    pid = /^[0-9]+$/.test(parent) ? parent : ''
+  }
+}
+const harness = await driver.harnessPid()
+check(/^[0-9]+$/.test(harness), `harnessPid() 返回了 pid：${harness || '(空)'}`)
+check(ancestorChain.includes(harness), `harnessPid() 落在本进程祖先链上（不是无关进程）：${harness}`)
+
+// (2) pid 文件记着「别的 harness」+ 服务端上有活会话 → 必须收养，不许清
+await run('shell_open', { name: 'keepme', cols: 80, rows: 24 })
+execFileSync('sh', ['-c', `printf '%s\\n' '999999 424242' > ${pidFile}`])
+const boot = await driver.bootstrap()
+const kept = await call('/list', 'GET')
+check(boot.adopted === false && boot.kept.length >= 1, `bootstrap 报告保住了 ${boot.kept.length} 个会话`)
+check(kept.body?.sessions?.length === 1, `pid 文件指向别的 harness 时，会话仍在（${kept.body?.sessions?.length} 个）`)
+check(boot.watchdogPid !== '', `重新布防了看门狗：pid ${boot.watchdogPid}`)
+await run('shell_close', { session: 'dsh-keepme' })
+
+// (3) 看门狗静默死亡 → 下一次操作必须自愈重布防（节流窗口 5 秒，故先等过去）
+await driver.disarmWatchdog()
+check(await driver.watchdogPid() === '', '看门狗已停掉（模拟静默死亡）')
+await new Promise(r => setTimeout(r, 5200))
+await run('shell_list', {})
+await new Promise(r => setTimeout(r, 1000))
+const rearmed = await driver.watchdogPid()
+check(rearmed !== '', `自愈生效：看门狗重新布防为 pid ${rearmed || '(无)'}`)
+await driver.disarmWatchdog()
+
+// (4) 看门狗脚本的两个关键修正（静态断言，防止以后被改回去）
+const tmuxSrc = readFileSync(join(pkgDir, 'lib', 'tmux.js'), 'utf8')
+check(tmuxSrc.includes('grep -qv "^$$$"'), '守卫排除了看门狗自身 pid（旧写法会匹配到自己，导致 kill-server 永不执行）')
+check(tmuxSrc.includes('miss=$((miss+1))') && tmuxSrc.includes('-lt 3'), '存活判定容忍连续失败（旧写法一次失败就永久退出）')
 
 const empty = await call('/list', 'GET')
 check(empty.body?.sessions?.length === 0, `收尾：剩 ${empty.body?.sessions?.length} 个会话`)

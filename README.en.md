@@ -102,13 +102,15 @@ shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "ke
 The tmux server setsids and reparents itself, so the harness's managed-process cleanup cannot
 reach it. This plugin therefore arms a **detached watchdog** (`setsid -f`) that polls the harness
 pid and runs `kill-server` once the harness is gone — the only mechanism that survives
-`kill -9` or a crash. On startup the watchdog is **adopted** (pid file records
-`"<watchdog pid> <harness pid>"`) only when that recorded harness pid **is the current process**,
-i.e. a hot reload — so hot reloads keep every shell. **Restarting `dsh web` does not**: the new
-harness sees a different pid and takes the orphan-cleanup branch instead, ending all shells. The
-two cases are indistinguishable from the pid file alone, which is why an orphaned server is
-cleaned rather than adopted. Unload is deliberately a no-op: dispose runs on every config reload,
-and killing the server there would throw away your shells on every edit.
+`kill -9` or a crash. On startup the watchdog is **adopted** only when the recorded harness pid
+**is the current process** (a hot reload); otherwise the plugin just **re-arms** it and **never
+cleans sessions** — an existing server is reused. So hot reloads and quick `dsh web` restarts keep
+every shell (the watchdog's guard notices the new harness and leaves the server alone). Only when
+the harness is gone for more than ~6 seconds — a crash, or a slow restart — does the watchdog
+collect the server, which is the whole point of the orphan cleanup. Unload is deliberately a
+no-op: dispose runs on every config reload, and killing the server there would throw away your
+shells on every edit. The watchdog also **self-heals**: if its process dies (its liveness check
+used to give up after a single miss), the next operation notices within 5 seconds and re-arms it.
 
 ## Security
 
