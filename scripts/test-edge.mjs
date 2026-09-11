@@ -278,6 +278,34 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(diag.code === 200 && typeof diag.body.socket === 'string', `GET /diagnose → ${diag.code}`)
   const listServer = (await call('/list', 'GET')).body.server
   check(Array.isArray(listServer.keptAtBoot), `GET /list 报告启动时保住的会话：keptAtBoot=${JSON.stringify(listServer.keptAtBoot)}`)
+
+  // 审批情报必须**如实**暴露：这是面板上「审批 never」标记的数据来源
+  const ap = listServer.approval
+  check(ap !== undefined && ['mounted', 'absent'].includes(ap.seam),
+    `approval.seam 如实报告审批缝是否挂载：${JSON.stringify(ap?.seam)}`)
+  check(['never', 'ask'].includes(ap?.policy),
+    `approval.policy 只可能是 never/ask：${JSON.stringify(ap?.policy)}（模式 ${ap?.permissionMode}）`)
+  check(typeof ap?.warning === 'string' && ap.warning.length > 20,
+    `approval.warning 给出风险说明：${String(ap?.warning).slice(0, 70)}…`)
+  // 与官方公式一致：danger-full-access → never，其余 → ask
+  const expected = ap?.permissionMode === 'danger-full-access' ? 'never' : 'ask'
+  check(ap?.policy === expected, `策略与官方预设公式一致（${ap?.permissionMode} → ${expected}）`)
+  check(diag.body.approval !== undefined, 'GET /diagnose 同样带 approval 情报')
+
+  // 核心事实：无论什么配置，都必须如实说明「本插件没有接入审批」
+  for (const [label, info] of [['/list', ap], ['/diagnose', diag.body.approval]]) {
+    check(info?.integrated === false, `${label} 明确 integrated=false（本插件不向官方审批缝发请求）`)
+    check(info?.policySource === 'deployment-default',
+      `${label} 如实标注策略来源（HTTP 拿不到会话）：${JSON.stringify(info?.policySource)}`)
+  }
+
+  // shell_diagnose 走工具路径，能拿到会话 —— 必须报出会话级策略与来源
+  const diagText = await run('shell_diagnose', {})
+  check(diagText.includes('approval: NOT INTEGRATED'),
+    'shell_diagnose 明说未接入审批、命令不会询问')
+  check(/approval policy: (never|ask) \((session-override|deployment-default)\)/.test(diagText),
+    'shell_diagnose 报出策略 + 来源（会话可覆盖部署默认）')
+  check(diagText.includes('risk:'), 'shell_diagnose 带一句风险说明')
   check(listServer.watchdogPid === '' || typeof listServer.watchdogPid === 'string', `watchdogPid 字段类型正常：${JSON.stringify(listServer.watchdogPid)}`)
 }
 

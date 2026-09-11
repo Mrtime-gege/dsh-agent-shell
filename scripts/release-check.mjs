@@ -188,6 +188,24 @@ for (const rel of SCAN) {
 }
 notes.push('未发现泄漏的开发机路径或凭据')
 
+/* ---------- 6.5 安全告警不许被悄悄删掉 ---------- */
+
+// 这不是格式检查，而是一条**产品承诺**：README 顶部必须持续告诉使用者
+// 「这是真实 shell、没有审批、护栏不是防护」，以及本插件由 AI 开发。
+for (const [rel, markers] of Object.entries({
+  'README.md': ['由 AI 开发', '没有任何审批防护', '启发式护栏'],
+  'README.en.md': ['developed by AI', 'no approval gate'],
+  'SECURITY.md': ['未经人工安全审计', '没有接入官方审批'],
+})) {
+  const abs = join(ROOT, rel)
+  if (!existsSync(abs)) continue
+  const body = readFileSync(abs, 'utf8')
+  for (const marker of markers) {
+    if (!body.includes(marker)) fail(`${rel} 缺少安全告知内容：${marker}（这一条不应被删掉）`)
+  }
+}
+notes.push('安全告知内容（AI 开发 / 无审批 / 护栏非防护）均在位')
+
 /* ---------- 7. bundle patch ---------- */
 
 const patchPath = join(ROOT, 'cordis.patch.yml')

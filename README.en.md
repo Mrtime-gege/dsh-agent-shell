@@ -11,6 +11,34 @@
 
 [中文（主文档）](./README.md) · **English**
 
+> **This plugin was developed by AI.** Design and implementation were done by an AI, with
+> extensive automated testing (~200 assertions) and real-machine verification — but **no human
+> security audit**. Factor that into your risk assessment.
+
+## ⚠️ Read this first: it is a real shell, with no approval gate
+
+**This is not a sandbox and not a restricted tool. Installing it hands a real machine's terminal
+to an AI.**
+
+* **The model can run arbitrary commands.** The `shell_*` tools drive a real `bash` inside a real
+  tmux session, **with your own user privileges**. It can read your files, rewrite your config,
+  make network calls, install things, delete things — nothing stops it.
+* **There is no approval prompt.** DSH ships an approval seam (`dsh-user-approval`), but in
+  `danger-full-access` — **the only mode this plugin can work in** — the platform sets its policy
+  to `never` (deterministic reject, no UI). This plugin does **not** integrate that seam, so a
+  command the model runs is never offered to you for allow/reject.
+* **The only defence is a heuristic guard** (`guardDangerousCommands`, on by default): ten regexes
+  matching `rm -rf /`, `mkfs`, `dd of=/dev/*`, `sudo` and friends. It is **trivially bypassed**
+  through concatenation, variables or script files, and it **false-positives** on innocent text.
+  It is a speed bump, **not a protection**.
+* **The HTTP endpoints are unauthenticated** (see [Security](#security)).
+* The `审批 never` tag on the panel is **a truthful notice, not a switch**: it means official
+  approval is off and nobody will be asked about the model's commands.
+
+Use it on your own dev box and accept that the model may run anything there; do **not** use it on
+machines holding irreplaceable data, in production, or anywhere prompt injection is plausible —
+or run it inside a container/VM to bound the blast radius.
+
 ## What it is
 
 A DSH plugin that owns a **private tmux server** (`-L dsh-agent`) with several named sessions on
@@ -122,6 +150,12 @@ local process that can reach the endpoint) do whatever you can do on your machin
   reach that port — another local user, a same-origin page, a browser you left open — can send
   keystrokes to your shells. Do not reverse-proxy it; set `exposeHttp: false` when you don't
   need it.
+* **There is no approval gate.** DSH's approval seam (`dsh-user-approval`,
+  `ctx.approval`) is not integrated here, and in `danger-full-access` — the only mode this plugin
+  can operate in — the platform's own policy for it is `never`. The practical meaning is: the
+  model's commands are never shown to you for allow/reject. The panel's `审批 never` tag reports
+  exactly that. The only "confirmation" is the guard's `confirm: true` retry, which depends on the
+  model's cooperation rather than enforcing anything.
 * **`guardDangerousCommands` is a heuristic speed bump, not a sandbox.** It pattern-matches the
   text you are about to send (`rm -rf /`, `mkfs`, `dd of=/dev/*`, `--no-preserve-root`, …). It is
   trivially bypassable through concatenation, variables or script files, and it produces false
