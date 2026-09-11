@@ -379,6 +379,37 @@ check(padStyleOk, '屏幕区内边距由 SCREEN_PAD_Y 推导（样式与滚动�
 
 /* ── 详情层里的「浏览器面闸门」一行：谁在把关、有没有降级 ─────────────────── */
 
+/* ── 详情层里的「审计 / 输出留痕 / tmux」三行 ─────────────────────────────── */
+
+const auditRowValue = plugin?.__auditRowValue
+const captureRowValue = plugin?.__captureRowValue
+const tmuxRowValue = plugin?.__tmuxRowValue
+check(typeof auditRowValue === 'function' && typeof captureRowValue === 'function' && typeof tmuxRowValue === 'function',
+  '审计 / 留痕 / tmux 三个显示函数已暴露')
+
+if (typeof auditRowValue === 'function') {
+  const on = auditRowValue({ audit: { enabled: true, dir: '/home/u/.dsh/agent-shell', retentionDays: 30, note: '' } })
+  check(on.includes('开') && on.includes('30 天') && on.includes('agent-shell'), `审计开着时显示目录与保留期 → 「${on}」`)
+  check(auditRowValue({ audit: { enabled: false } }).includes('已关闭'), '审计关闭时如实写关闭')
+  const failed = auditRowValue({ audit: { enabled: true, dir: '/x', retentionDays: 7, note: '审计写入失败（磁盘/权限）' } })
+  check(failed.startsWith('⚠') && failed.includes('写入失败'),
+    `审计写失败必须显眼（否则用户以为有审计其实没有）→ 「${failed}」`)
+  check(auditRowValue({ socket: 'x' }).includes('未知'), '旧宿主未上报 → 未知，不猜')
+
+  const cap = captureRowValue({ audit: { capture: true, captureMaxBytes: 67108864, captureStopped: [] } })
+  check(cap.includes('64 MiB'), `留痕显示上限 → 「${cap}」`)
+  const capped = captureRowValue({ audit: { capture: true, captureMaxBytes: 4096, captureStopped: ['dsh-a', 'dsh-b'] } })
+  check(capped.startsWith('⚠') && capped.includes('2 个'), `触顶被停的会话要露出来 → 「${capped}」`)
+  check(captureRowValue({ audit: { capture: false } }).includes('已关闭'), '留痕关闭时如实写关闭')
+
+  const ok = tmuxRowValue({ tmux: { ok: true, version: 'tmux 3.6b' } })
+  check(ok.includes('3.6b'), `tmux 正常时显示版本 → 「${ok}」`)
+  const missing = tmuxRowValue({ tmux: { ok: false, error: 'spawn tmux ENOENT' } })
+  check(missing.startsWith('⚠') && missing.includes('WSL'),
+    `缺 tmux 时直接给安装指引（开箱即用的第一条就是"缺什么就说清"）→ 「${missing}」`)
+  check(tmuxRowValue({}).includes('未知'), '体检未完成/旧宿主 → 未知')
+}
+
 const fenceRowValue = plugin?.__fenceRowValue
 check(typeof fenceRowValue === 'function', '闸门显示函数 __fenceRowValue 已暴露')
 

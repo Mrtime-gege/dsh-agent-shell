@@ -159,12 +159,19 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   }
 
   const mod = await import(join(pkgDir, 'lib', 'index.js'))
-  mod.apply(ctx, { socket, httpBase: base, watchdog: false, exposeHttp: true, exposeTools: true, ...config })
+  // 审计目录指到临时目录：测试跑出来的审计/留痕文件绝不该落进用户真实目录
+  mod.apply(ctx, {
+    socket, httpBase: base, watchdog: false, exposeHttp: true, exposeTools: true,
+    auditDir: join(root, 'audit'),
+    ...config,
+  })
 
-  const run = async (name, args) => {
+  // 第三个参数是「执行上下文」：真实运行时由工具管线注入，里面有调用方 agent ——
+  // 归属（D1）与审计的 actor 都来自它，所以测试必须能模拟它，否则那条路径等于没测。
+  const run = async (name, args, exec = {}) => {
     const tool = tools.get(name)
     if (tool === undefined) throw new Error(`工具不存在：${name}`)
-    const value = await tool.execute(args ?? {}, {})
+    const value = await tool.execute(args ?? {}, exec)
     return typeof value === 'string' ? value : JSON.stringify(value)
   }
 

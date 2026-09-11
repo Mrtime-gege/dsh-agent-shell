@@ -104,9 +104,9 @@ dsh plugin --profile web add dsh-agent-shell    # 或 file:/path/to/dsh-agent-sh
     extendedKeys: true      # 需要 tmux ≥ 3.2，改完要重启
 ```
 
-15 个参数：`socket` `httpBase` `exposeHttp` `exposeTools` `watchdog` `shell` `defaultTerminal`
+20 个参数：`socket` `httpBase` `exposeHttp` `exposeTools` `watchdog` `shell` `defaultTerminal`
 `cols` `rows` `historyLimit` `maxSessions` `defaultCwd` `guardDangerousCommands` `allowedHosts`
-`extendedKeys`。
+`extendedKeys` `auditDir` `audit` `auditRetentionDays` `captureOutput` `captureMaxBytes`。
 **哪些立即生效、哪些要重启**在设置页的字段说明里逐条写明，插件也会在改完后如实回报
 （「已保存，并已立即生效」/「下列项要重启 dsh web 才生效：historyLimit」），面板的 ⓘ 详情能看到。
 设置页里填越界值会被**当场拒绝并给出范围**（例如 `cols 必须在 20–1000 之间（现在是 5000）`），
@@ -170,7 +170,8 @@ shell_read  { "session": "dsh-build" }
 | `shell_resize` | ★`session` ★`cols` ★`rows` | 改尺寸（夹到 20–1000 × 5–500） |
 | `shell_rename` | ★`session` ★`newName` | 重命名（自动净化名字并补 `dsh-` 前缀） |
 | `shell_close` | ★`session` | 关闭（**幂等**：已经没了也返回成功并说明没关到） |
-| `shell_diagnose` | — | 服务端 / 看门狗 / 起始目录 / **审批状态** |
+| `shell_audit` | `session?` `actor?` `source?` `lines?` `days?` | 读审计流水：谁在什么时候往哪个 shell 发了什么（含**已关闭**的会话）；同时报告留痕文件 |
+| `shell_diagnose` | — | 服务端 / 看门狗 / 起始目录 / tmux / 闸门 / 审计 / **审批状态** |
 
 `shell_send` 的 `preKeys` / `keys` 收 tmux 键名（`Escape`、`C-c`、`Enter`、`Up`…），`text` 原样输入：
 
@@ -197,6 +198,7 @@ POST /plugins/shell/kill                     {name}
 POST /plugins/shell/resize                   {name, cols, rows}
 POST /plugins/shell/rename                   {name, newName}
 GET  /plugins/shell/diagnose
+GET  /plugins/shell/audit?name=&actor=&source=&lines=&days=   审计流水 + 留痕文件清单
 ```
 
 ## 已知限制
@@ -209,6 +211,10 @@ GET  /plugins/shell/diagnose
 * `sudo -i` 这类登录 shell 里 `pane_current_command` 会一直是 `sudo`，状态点不会回到空闲。
 * 只看得到本插件自己创建的 shell（有意设计）：不枚举默认 socket，也接不进你已有的 tmux 会话。
 * **宿主停机超过约 6 秒**时，全部 shell 会被孤儿看门狗收掉（崩溃、慢重启属于这一类）。
+* **审计日志是本机文件**：能读你 home 的进程就能改它 —— 它解决"事后查得清"，不解决"防抵赖"
+  （要后者需要 hash 链或只读归档）。面板侧的人类输入只能记到 `panel` 这一粒度，无法区分是谁。
+* **输出留痕会把终端里出现过的敏感内容一起记下来**（密码、令牌、打印的密钥）。不需要就
+  `captureOutput: false`；需要可随时回看的就留着，目录 0600 且可 `auditDir` 指到加密卷。
 * **HTTP 服务绑到 `0.0.0.0` 时闸门会降级**：`Host` 无法用于判定是否本机，DNS rebinding 那条路径
   不再被挡住。面板 ⓘ 的「浏览器面闸门」会以 `⚠` 明确标出。
 
@@ -251,6 +257,45 @@ GET  /plugins/shell/diagnose
 测试新增 39 项断言（宿主侧），其中最关键的是**反向对照**：同一个 `POST /keys`，带攻击头 → `403`
 且**命令没有执行**；去掉攻击头 → `200` 且命令真的执行 —— 这才证明「是闸门挡下的」，而不是
 「命令本身没跑起来」。另外用恶意 socket 名**真跑一次** `sh -c`，断言注入标记文件没有生成。
+
+### 0.1.4 — 可审计（输入流水 + 输出留痕 + 归属）与「开箱即用」
+
+#### 新增：审计
+
+跨对话保活是这套机制的核心价值，代价是**任何对话都能看到并操作任何 shell**（实测：在 A 对话里
+`shell_list` 就能列出 B 对话创建的 shell）。既然隔离与保活互斥，那就把「事后查得清」做扎实：
+
+- **输入流水**：进入终端的字节只经过两个入口 —— 工具的 `shell_send` 与面板的 `/keys`，
+  所以在这两处记账即**完整**。每条记录含时间、shell 名、来源（tool/panel）、
+  **发起会话 id**（`exec.agent.session.id`；面板侧只能记 `panel`）、text/keys、护栏决策与结果。
+  **被护栏拦下的企图同样留痕** —— 只记成功的审计等于把最该看的藏起来。
+- **输出留痕**：每个会话用 tmux `pipe-pane` 把终端输出（含回显的命令、程序输出、TUI 画面）
+  原样追加到 `output/<shell>-<起始时间>.log`，**会话关掉后文件仍在**（实测保留字节并命中标记）——
+  这就是"关闭会话后依然可见"。默认单会话上限 64 MiB，触顶自动停止留痕**并记一条审计**
+  （磁盘上少了一段，必须有人知道）。
+- **归属标注（D1）**：`shell_open` 记下发起会话 id，`shell_list` 显示 `owner=…` 或
+  `owner=panel`；插件之外建的会话如实标 `owner=unknown`。**只标注、不拦截** ——
+  非 owner 依然可以操作，这条被测试刻意钉住，避免以后被误改成隔离。
+- **查询面**：新增 `shell_audit` 工具与 `GET /plugins/shell/audit`（面板 ⓘ 用），
+  支持按 shell / actor / source / 天数过滤；面板 ⓘ 新增「审计」「输出留痕」两行，
+  如实显示目录、保留期、上限、以及**写失败**（审计不可信时不能装作有）。
+- 落盘：`${DSH_HOME:-~/.dsh}/agent-shell/`，目录 0700、文件 0600，按天轮转、默认保留 30 天
+  （过期文件在启动时清理）。可用 `auditDir` 指到别处（例如加密卷）。
+
+#### 修复：开箱即用
+
+在另一台机器上装 0.1.2 暴露出两个真问题：
+
+- **pnpm 报缺 peer**（`Issues with peer dependencies found`）：profile 的 pnpm 配置是
+  `autoInstallPeers: false`，peer 本应由 DSH 的**模块代理**在启动时提供，而我们把四个
+  peer 声明成了必装 —— 包管理器于是要么报警告，要么（npm）真装进来一份 **第二实例**的
+  cordis/dsh-tools（比警告严重得多）。现在四个 peer 全部标记 `peerDependenciesMeta.optional`
+  （名字仍在 `peerDependencies` 里，DSH 的代理机制照旧生效），实测 `pnpm peers check` 输出
+  `No peer dependency issues found`。
+- **tmux 是系统依赖，包管理器不会提醒**：没有 tmux 的机器会"装成功"，然后在第一次开会话时抛
+  一个谁也看不懂的 spawn 错误。现在插件启动时体检一次（记录版本），缺失时：
+  控制台与 `shell_diagnose` 给出**可执行的安装指引**，`shell_open` 直接返回同一条提示，
+  面板 ⓘ 新增「tmux」一行并以 ⚠ 标出。缺什么就说清什么，这才叫开箱即用。
 
 ### 0.1.3 — 发布链路自动化：推 tag 即发布（带 provenance）
 

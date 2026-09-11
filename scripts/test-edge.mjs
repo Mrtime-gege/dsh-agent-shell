@@ -17,8 +17,10 @@
  * 用法：DSH_PEERS_DIR=/path/to/dsh-webui node scripts/test-edge.mjs [tgz]
  */
 
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+
+const outputSizeOf = (p) => { try { return statSync(p).size } catch { return 0 } }
 import { makeHarness, makeChecker, resolvePeers, packIntoTemp, skipOrFail } from './lib/kit.mjs'
 
 const SOCKET = 'dsh-edge'
@@ -544,6 +546,140 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(String(injList.socketNote).includes('收敛') && String(injList.socketNote).includes('bad;name'),
     `面板如实报告原值：${injList.socketNote}`)
   h3.cleanup()
+}
+
+/* ── 7.9 审计：输入流水 + 输出留痕 + 归属标注 ───────────────────────────────── */
+
+{
+  const auditDir = join(h.pkgDir, '..', 'audit')
+  const day = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()
+  const auditFile = join(auditDir, `audit-${day}.jsonl`)
+  const readLines = () => {
+    if (!existsSync(auditFile)) return []
+    return readFileSync(auditFile, 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
+  }
+  const mark = readLines().length
+  // 审计是 append-only 的异步写入（fire-and-forget），断言前要给它一点时间落盘；
+  // 这也是真实使用中的可见性语义：刚发生的操作可能要过一瞬才出现在日志里。
+  const settle = () => new Promise((r) => setTimeout(r, 250))
+  const ACTOR = 'session-under-test'
+  const EXEC = { agent: { session: { id: ACTOR } } }
+
+  // 1) 模型路径：开 shell（带 cwd）→ 发命令 → 关掉；每一步都要留痕
+  const opened = await run('shell_open', { name: 'audit-model', cwd: '/tmp' }, EXEC)
+  check(String(opened).includes('session dsh-audit-model'), `开了审计用会话：${String(opened).split('\n')[0]}`)
+  await run('shell_send', { session: 'dsh-audit-model', text: 'echo audit-marker-555', keys: ['Enter'] }, EXEC)
+  await settle()
+
+  const lines = readLines().slice(mark)
+  const openRec = lines.find((r) => r.event === 'open' && r.shell === 'dsh-audit-model')
+  check(openRec !== undefined, '开了会话 → 记下 open 事件')
+  check(openRec !== undefined && openRec.source === 'tool' && openRec.actor === ACTOR,
+    `open 记录了来源与发起者（模型侧必须带上会话 id）：source=${openRec?.source} actor=${openRec?.actor}`)
+  check(openRec !== undefined && openRec.captureFile !== undefined && String(openRec.captureFile).includes('output'),
+    `open 记录了留痕文件路径：${openRec?.captureFile}`)
+
+  const inputRec = lines.find((r) => r.event === 'input' && r.shell === 'dsh-audit-model')
+  check(inputRec !== undefined && inputRec.text === 'echo audit-marker-555', `模型输入被记下：${JSON.stringify(inputRec?.text)}`)
+  check(inputRec !== undefined && inputRec.guard === 'allowed' && inputRec.source === 'tool', `记下了护栏决策与来源：guard=${inputRec?.guard} source=${inputRec?.source}`)
+
+  // 2) 面板路径：人的键击同样留痕（这是修复前完全查不到的那一半）
+  const panelSend = await call('/keys', 'POST', { name: 'dsh-audit-model', text: 'echo panel-typed', keys: ['Enter'] })
+  check(panelSend.code === 200, `面板发键 → HTTP ${panelSend.code}`)
+  await settle()
+  const panelRec = readLines().filter((r) => r.event === 'input' && r.source === 'panel').pop()
+  check(panelRec !== undefined && panelRec.actor === 'panel' && panelRec.text === 'echo panel-typed',
+    `面板输入也留痕，来源标注为 panel：${JSON.stringify({ actor: panelRec?.actor, text: panelRec?.text })}`)
+
+  // 3) 被护栏拦下也是一次**企图** —— 只记成功的审计等于把最该看的藏起来
+  const refused = await call('/keys', 'POST', { name: 'dsh-audit-model', text: 'rm -rf /', keys: ['Enter'] })
+  check(refused.code === 409, `高危命令被护栏拦下 → HTTP ${refused.code}`)
+  await settle()
+  const refusedRec = readLines().filter((r) => r.event === 'input' && r.guard === 'refused').pop()
+  check(refusedRec !== undefined && refusedRec.text === 'rm -rf /',
+    `被拦下的企图同样留痕（guard=${refusedRec?.guard}）：${JSON.stringify(refusedRec?.text)}`)
+
+  // 4) 输出留痕：文件里要有回显的命令；**关掉会话后文件仍在**（这就是"关闭会话后依然可见"）
+  const captureFile = String(openRec?.captureFile ?? '')
+  await new Promise((r) => setTimeout(r, 500))
+  check(captureFile !== '' && existsSync(captureFile), `留痕文件已生成：${captureFile}`)
+  const captured = captureFile !== '' && existsSync(captureFile) ? readFileSync(captureFile, 'utf8') : ''
+  check(captured.includes('audit-marker-555') && captured.includes('panel-typed'),
+    '留痕内容包含两个标记（模型发的与面板发的都在终端里留了痕）')
+  await run('shell_close', { session: 'dsh-audit-model' })
+  await settle()
+  check(existsSync(captureFile), `关掉会话后留痕文件依然在（${existsSync(captureFile) ? (await outputSizeOf(captureFile)) + 'B' : '已丢失'}）`)
+  check(readLines().some((r) => r.event === 'close' && r.shell === 'dsh-audit-model'), '关闭会话也留痕')
+
+  // 5) 归属标注（D1：只标注、不拦截）：shell_list 必须显示 owner，其他人仍能操作
+  const listed = await run('shell_list', {})
+  await run('shell_open', { name: 'audit-owned' }, EXEC)   // 带发起者：归属才有的可查
+  const listed2 = await run('shell_list', {})
+  check(String(listed2).includes('owner='), `shell_list 显示归属：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
+  await settle()
+  const ownerRec = readLines().filter((r) => r.event === 'open' && r.shell === 'dsh-audit-owned').pop()
+  check(ownerRec !== undefined && ownerRec.actor !== '', '归属来自发起者的会话 id（面板建的则标 panel）')
+  check(String(listed2).includes(`owner=${ACTOR}`),
+    `归属值来自真实发起者的会话 id（不是猜的）：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
+  // 插件之外建的会话（同 socket 上手工开的）必须如实标 unknown，而不是猜一个看起来像答案的值
+  tmux(['new-session', '-d', '-s', 'dsh-outside', '-x', '80', '-y', '24'])
+  await new Promise((r) => setTimeout(r, 300))
+  const listed3 = await run('shell_list', {})
+  check(String(listed3).includes('dsh-outside') && /dsh-outside[^\n]*owner=unknown/.test(String(listed3)),
+    `插件之外建的会话如实标 unknown：${String(listed3).split('\n').find((l) => l.includes('dsh-outside'))}`)
+  tmux(['kill-session', '-t', 'dsh-outside'])
+  // 非 owner 依然可操作 —— D1 是标注而非隔离，这里把这条**刻意**钉住，避免以后被误改成拦截
+  const crossSend = await call('/keys', 'POST', { name: 'dsh-audit-owned', text: 'echo cross-actor-ok', keys: ['Enter'] })
+  check(crossSend.code === 200, `D1 只标注不拦截：别人（面板）照样能操作该会话 → HTTP ${crossSend.code}`)
+  await run('shell_close', { session: 'dsh-audit-owned' })
+
+  // 6) 查询面：工具与 HTTP 都能读回审计
+  const auditText = await run('shell_audit', { session: 'dsh-audit-model', lines: 20 })
+  check(String(auditText).includes('audit dir:') && String(auditText).includes('audit-marker-555'),
+    `shell_audit 能查回输入记录：${String(auditText).split('\n').slice(0, 2).join(' | ')}`)
+  check(String(auditText).includes('output transcripts:'), 'shell_audit 同时报告留痕文件')
+  const auditHttp = await call('/audit?name=dsh-audit-model&lines=50', 'GET')
+  check(auditHttp.code === 200 && auditHttp.body.enabled === true && Array.isArray(auditHttp.body.records),
+    `GET /audit 可用（${auditHttp.body.records?.length} 条记录）`)
+  check((auditHttp.body.records ?? []).some((r) => r.summary.includes('audit-marker-555')), '/audit 返回可读摘要')
+
+  // 7) 默认值必须**可见**：面板要知道审计开着、目录在哪、留痕上限定多少
+  const audited = (await call('/list', 'GET')).body.server.audit
+  check(audited !== undefined && audited.enabled === true && String(audited.dir).includes('audit'),
+    `面板能看到审计状态与目录：${JSON.stringify(audited)?.slice(0, 140)}`)
+  check(audited.capture === true && audited.captureMaxBytes > 0,
+    `面板能看到留痕开关与上限：capture=${audited.capture} cap=${audited.captureMaxBytes}`)
+}
+
+{
+  // 8) 上限与保留期：留痕触顶自动停止并留痕；过期审计文件被清理
+  const { prunePlan, auditPaths: buildPaths, outputFileFor } = await import(join(h.pkgDir, 'lib', 'audit.js'))
+  check(prunePlan(['audit-2026-09-01.jsonl', 'audit-2026-09-11.jsonl', 'sessions.json'], '2026-09-12', 3).remove.length === 1,
+    '保留期内的审计文件不会被删，过期的才删')
+  check(prunePlan(['weird.txt'], '2026-09-12', 1).remove.length === 0, '不认识的文件名一律不动（不误删别人的东西）')
+
+  const h4 = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-cap`,
+    config: { watchdog: false, captureMaxBytes: 4096 },
+  })
+  const capOpen = await h4.call('/new', 'POST', { name: 'cap-test' })
+  check(capOpen.code === 200, `留痕上限测试：会话已建 → HTTP ${capOpen.code}`)
+  // 灌出一大段输出把留痕撑过 4 KiB
+  await h4.call('/keys', 'POST', { name: 'dsh-cap-test', text: 'for i in $(seq 1 400); do echo capfiller-$i; done', keys: ['Enter'] })
+  await new Promise((r) => setTimeout(r, 1200))
+  await h4.call('/screen?name=dsh-cap-test', 'GET')   // 上限检查挂在轮询上
+  await new Promise((r) => setTimeout(r, 400))
+  const capInfo = (await h4.call('/list', 'GET')).body.server.audit
+  check(capInfo.captureStopped.includes('dsh-cap-test'),
+    `留痕触顶后被停止（captureStopped=${JSON.stringify(capInfo.captureStopped)}）—— 不设上限会悄悄吃满磁盘`)
+  const capDay = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()
+  const capLog = join(h4.pkgDir, '..', 'audit', `audit-${capDay}.jsonl`)
+  const capRecords = existsSync(capLog) ? readFileSync(capLog, 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l)) : []
+  check(capRecords.some((r) => r.event === 'capture' && String(r.result).includes('size cap')),
+    '停止留痕这件事本身也留了痕（否则磁盘上少了一段没人知道）')
+  h4.cleanup()
 }
 
 /* ── 7.8 使用策略：别随手用持久化 shell ─────────────────────────────────────── */

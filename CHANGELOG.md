@@ -20,6 +20,30 @@
 - `SECURITY.md` 重写第 1 条并新增第 8（攻击面清单）、第 9（配置注入面）条，明确区分「已挡住」与
   「接受的风险」。
 
+## 0.1.4 — 可审计与开箱即用
+
+### 新增：审计（L1 输入流水 / L2 输出留痕 / L3 归属标注）
+
+- 输入流水：工具 `shell_send` 与面板 `/keys` 两个唯一入口全部记账（时间、shell、来源、
+  发起会话 id、text/keys、护栏决策、结果），**被拦下的企图也记**；`shell_audit` 工具与
+  `GET /audit` 提供查询；面板 ⓘ 新增「审计」「输出留痕」两行（含写失败告警）。
+- 输出留痕：`pipe-pane` 把终端字节流写到 `output/<shell>-<起始>.log`，**会话关闭后仍在**；
+  单会话上限（默认 64 MiB）触顶自动停止并留痕。
+- 归属标注 D1：`shell_open` 记录发起会话，`shell_list` 显示 `owner=…`；只标注不拦截
+  （测试刻意钉住"非 owner 仍可操作"，防止以后被误改成隔离）。
+- 新增配置 `auditDir` / `audit` / `auditRetentionDays` / `captureOutput` / `captureMaxBytes`
+  （全部带说明，设置页可改；审计目录 0700、文件 0600、按天轮转）。
+
+### 修复：开箱即用
+
+- **peer 声明改 optional**：profile 的 pnpm 是 `autoInstallPeers: false`，peer 由 DSH 模块代理
+  提供；必装声明会导致 pnpm 报警告，npm 更会装进**第二实例**的 cordis/dsh-tools。现在
+  `pnpm peers check` 干净。
+- **tmux 体检**：启动时探一次版本；缺失时控制台 / `shell_diagnose` / `shell_open` / 面板 ⓘ
+  都给出可执行的安装指引，而不是 spawn 的原始错误。
+- 修掉 `setOwner()` 覆盖 `owners[name]` 导致 `captureFile` 丢失的 bug（会让留痕上限检查失效）。
+- 测试侧：新增 `auditDir` 配置并让测试桩把审计目录指到临时目录 —— 测试不再写进用户真实目录。
+
 ## 0.1.3 — 发布链路自动化：推 tag 即发布（带 provenance）
 
 把发布从「本地 `npm publish` + 手工授权」改成 **推 tag → CI 用 OIDC 身份自动发布**。
