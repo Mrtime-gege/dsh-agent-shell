@@ -281,6 +281,22 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(list.settings !== undefined && list.settings.live === true, `面板能看到设置已接入：${JSON.stringify(list.settings)}`)
   check(list.settings.namespace === 'dsh-agent-shell', `面板显示 namespace：${list.settings.namespace}`)
 
+  // ── 注册**真的成功了**（不是「桩被调用过」就算数）──────────────────────────
+  //
+  // 这里守的是一个真实踩过的坑：`state` 曾声明在设置注册之后，而官方 installSection 会在
+  // 注册时**同步**回调 onChange → applyResolved → 读 state → TDZ ReferenceError，被注册的
+  // try/catch 吞掉。表现是「看起来注册了，但改设置永远不生效」。旧断言只检查了桩被调用，
+  // 所以完全没发现 —— 必须断言**结果**。
+  const settingsLogs = h.logs.join('\n')
+  check(!settingsLogs.includes('settings registration failed'),
+    `注册过程没有抛错（日志里不该有 settings registration failed）${settingsLogs.includes('settings registration failed') ? ' ← ' + settingsLogs.split('\n').filter(l => l.includes('settings registration failed')).join(' | ') : ''}`)
+  check(String(list.settings.note).includes('可在 DSH 设置'),
+    `成功注册后面板如实显示入口：${list.settings.note}`)
+  check(reg !== undefined && reg.resolved !== undefined && reg.resolved.cols === 120,
+    `validate 收到的是套过默认值的完整配置（cols=${reg ? reg.resolved.cols : '-'}）`)
+  check(reg !== undefined && typeof reg.validate === 'function', '越界校验钩子已挂上（validate）')
+
+
   // 1) 可热更项：maxSessions 3 → 1，应当**立刻**受限
   //    注意先建一个会话 —— 上限判定是「已有数 >= 上限」，空着的时候第一个当然允许。
   const first = await call('/new', 'POST', { name: 'within-limit' })
@@ -302,8 +318,83 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   const diagText2 = await run('shell_diagnose', {})
   check(diagText2.includes('settings namespace: dsh-agent-shell'), 'shell_diagnose 也报告设置来源')
 
-  // 3) 改回默认，免得影响后续小节
+  // 3) 组合配置本身越界时：设置页注册失败，但要**如实告知**、且插件照常工作
+  //    （不能让一条越界的 YAML 把整个插件带崩，也不能静默失败）
+  const h2 = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-bad`,
+    config: { shell: '   ', __withSettings: true },
+  })
+  const badList = (await h2.call('/list', 'GET')).body.server
+  check(badList.settings.live === false, `组合配置越界时 live 如实为 false：${JSON.stringify(badList.settings)}`)
+  check(badList.settings.service === true && badList.settings.registered === false,
+    '服务挂载 ≠ 注册成功，两者分别报告')
+  check(String(badList.settings.note).includes('设置页未注册') && String(badList.settings.note).includes('shell'),
+    `失败原因如实写进面板：${badList.settings.note}`)
+  const stillWorks = await h2.run('shell_list', {})
+  check(String(stillWorks).includes('session') || String(stillWorks).length > 0,
+    `设置页不可用时插件照常工作（shell_list 仍可用）`)
+  h2.cleanup()
+
+  // 4) 改回默认，免得影响后续小节
   h.changeSettings({ maxSessions: 3, historyLimit: 100000 })
+
+  // ── 表单本身的质量：每个参数都要有说明，且说明要写清「改完是否立即生效」──────
+  //
+  // 设置页的表单是**由 schema 生成的**：没有 description 的字段在用户眼里只是一个
+  // 光秃秃的键名。所以这条不变式不是文档洁癖，它守的是用户实际看到的东西。
+  const schemaJson = h.mod.Config.toJSON()
+  // schemastery 的 toJSON 把根 schema 放在 refs[uid] 里，dict 的值是 ref 编号
+  const rootRef = typeof schemaJson.uid === 'number' ? schemaJson.refs?.[String(schemaJson.uid)] : schemaJson
+  const fields = Object.entries(rootRef?.dict ?? {})
+  check(fields.length >= 14, `schema 里暴露了 ${fields.length} 个参数`)
+  const resolveRef = (ref) => (typeof ref === 'number' ? schemaJson.refs[String(ref)] : ref)
+  const noDoc = []
+  for (const [key, ref] of fields) {
+    const meta = resolveRef(ref)?.meta ?? {}
+    if (typeof meta.description !== 'string' || meta.description.trim() === '') noDoc.push(key)
+  }
+  check(noDoc.length === 0, `每个参数都有说明文字（缺说明的：${noDoc.join('、') || '无'}）`)
+
+  // 说明里必须写明生效时机：需重启的要说「重启」，热更的要说「立即生效」
+  const RESTART_KEYS = ['socket', 'httpBase', 'exposeHttp', 'exposeTools', 'defaultTerminal', 'historyLimit', 'extendedKeys']
+  const LIVE_KEYS = ['watchdog', 'shell', 'cols', 'rows', 'maxSessions', 'defaultCwd', 'guardDangerousCommands']
+  const describe = (key) => String(resolveRef(fields.find(([k]) => k === key)?.[1])?.meta?.description ?? '')
+  const vague = []
+  for (const key of RESTART_KEYS) if (!describe(key).includes('重启')) vague.push(`${key}(缺「重启」)`)
+  for (const key of LIVE_KEYS) if (!describe(key).includes('立即生效')) vague.push(`${key}(缺「立即生效」)`)
+  check(vague.length === 0, `说明文字写清了生效时机（有问题的：${vague.join('、') || '无'}）`)
+
+  // ── 越界值必须被**当场拒绝**，而不是悄悄改小 ─────────────────────────────────
+  const validate = h.mod.validateSettings
+  check(typeof validate === 'function', 'validateSettings 已导出（挂给设置页做取值校验）')
+
+  // 候选值先过一遍 schema（等于真实服务 resolve() 套默认值），否则 validate 会抱怨缺字段
+  const schemaOf = h.settingsRegistrations[0].schema
+  const candidate = (patch) => schemaOf({ ...h.reloadConfig(), ...patch })
+  const rejects = (patch, label, expect = '') => {
+    let message = ''
+    try { validate(candidate(patch)) } catch (error) { message = String(error && error.message ? error.message : error) }
+    check(message !== '' && (expect === '' || message.includes(expect)),
+      `设置页拒绝非法取值：${label}（${message || '竟然通过了'}）`)
+    return message
+  }
+  const colMsg = rejects({ cols: 5000 }, 'cols=5000', '20–1000')
+  check(colMsg.includes('20–1000'), `拒绝信息只针对出问题的字段并给出范围：${colMsg}`)
+  rejects({ cols: 0 }, 'cols=0')
+  rejects({ rows: 1 }, 'rows=1')
+  rejects({ maxSessions: 0 }, 'maxSessions=0')
+  rejects({ historyLimit: 10 }, 'historyLimit=10')
+  rejects({ socket: 'a/b' }, 'socket 含斜杠')
+  rejects({ socket: '' }, 'socket 为空')
+  rejects({ httpBase: 'plugins/shell' }, 'httpBase 不以 / 开头')
+  rejects({ shell: '   ' }, 'shell 是空白')
+
+  // 合法值不能被误杀（默认值、边界值都要过）
+  let accepted = ''
+  try {
+    validate(candidate({ cols: 20, rows: 500, maxSessions: 64, historyLimit: 100 }))
+  } catch (error) { accepted = String(error && error.message ? error.message : error) }
+  check(accepted === '', `边界内的取值可以保存（${accepted || '通过'}）`)
 }
 
 /* ── 7.8 使用策略：别随手用持久化 shell ─────────────────────────────────────── */

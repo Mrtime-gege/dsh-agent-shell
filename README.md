@@ -87,6 +87,28 @@ dsh plugin --profile web add dsh-agent-shell    # 或 file:/path/to/dsh-agent-sh
 > 同一个 `id` 在整份组合里只能出现一次，重复会让 `dsh web` 直接起不来
 > （`duplicate loader entry id: agent-shell`）。详见 [docs/使用细节.md](./docs/使用细节.md)。
 
+## 改参数：两种方式
+
+| 方式 | 怎么改 | 适合 |
+|---|---|---|
+| **设置页**（推荐） | 打开 **DSH 设置 → 插件 → `dsh-agent-shell`**，表单由 schema 直接生成，每个参数都带说明 | 日常调整；**大多数项改完立即生效**，不用动任何文件 |
+| `cordis.patch.yml` | 给 `id: agent-shell` 那一行写 `config` | 首次部署、或要写进版本管理 |
+
+```yaml
+- id: agent-shell
+  config:
+    maxSessions: 16         # 会话数上限（立即生效）
+    shell: zsh              # 新会话用 zsh（立即生效）
+    extendedKeys: true      # 需要 tmux ≥ 3.2，改完要重启
+```
+
+14 个参数：`socket` `httpBase` `exposeHttp` `exposeTools` `watchdog` `shell` `defaultTerminal`
+`cols` `rows` `historyLimit` `maxSessions` `defaultCwd` `guardDangerousCommands` `extendedKeys`。
+**哪些立即生效、哪些要重启**在设置页的字段说明里逐条写明，插件也会在改完后如实回报
+（「已保存，并已立即生效」/「下列项要重启 dsh web 才生效：historyLimit」），面板的 ⓘ 详情能看到。
+设置页里填越界值会被**当场拒绝并给出范围**（例如 `cols 必须在 20–1000 之间（现在是 5000）`），
+而不是悄悄改小。完整表格见 [docs/使用细节.md](./docs/使用细节.md)。
+
 ## 快速上手
 
 1. 装好并重启后，页面右下角出现胶囊 **`>_ N 🔒`**（N 是 shell 数）。

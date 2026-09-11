@@ -120,7 +120,11 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   const settings = config.__withSettings === true
     ? {
         installSection (owner, ns, schema, entry, hooks) {
-          settingsRegistrations.push({ ns, entry })
+          // 真实服务的 resolve() 会**先套上 schema 默认值**再调 validate，这里照做：
+          // 否则 validate 收到的是缺字段的原始 entry，会误判成非法值。
+          const resolved = typeof schema === 'function' ? schema(entry) : entry
+          if (typeof hooks.validate === 'function') hooks.validate(resolved)
+          settingsRegistrations.push({ ns, entry, resolved, schema, validate: hooks.validate })
           settingsHooks = hooks
           hooks.setSource(() => settingsSource())
           hooks.onChange()
@@ -205,7 +209,11 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
     if (settings === undefined || settingsHooks === null) {
       throw new Error('测试未启用假 settings 服务（传 __withSettings: true）')
     }
-    settingsSource = () => ({ ...config, ...next, __withSettings: true })
+    const raw = { ...config, ...next, __withSettings: true }
+    const schema = settingsRegistrations[0]?.schema
+    const candidate = typeof schema === 'function' ? schema(raw) : raw
+    if (typeof settingsHooks.validate === 'function') settingsHooks.validate(candidate)
+    settingsSource = () => candidate
     settingsChanges.push(next)
     settingsHooks.onChange()      // 等价于用户在设置页保存后服务发出的通知
     return settings
@@ -213,7 +221,7 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
 
   return { pkgDir, tools, routes, run, call, driver, tmux, cleanup, logs, subprocess, timer,
     settings, settingsRegistrations, changeSettings, reloadConfig: () => config,
-    systemPromptContexts }
+    systemPromptContexts, mod }
 }
 
 /** 断言器：收集失败而不是立刻抛出，跑完一次性汇报。 */

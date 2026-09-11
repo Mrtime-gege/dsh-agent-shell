@@ -375,6 +375,32 @@ if (typeof pillModel === 'function') {
 const padStyleOk = /padding:\s*\(SCREEN_PAD_Y \/ 2\)/.test(readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8'))
 check(padStyleOk, '屏幕区内边距由 SCREEN_PAD_Y 推导（样式与滚动补偿不会各自写死）')
 
+/* ── 详情层里的「参数设置」一行：三种状态必须分开 ───────────────────────────── */
+
+const settingsRowValue = plugin?.__settingsRowValue
+check(typeof settingsRowValue === 'function', '设置状态显示函数 __settingsRowValue 已暴露')
+
+if (typeof settingsRowValue === 'function') {
+  const reg = settingsRowValue({ settings: { registered: true, live: true, note: '可在 DSH 设置 → 插件 里修改' } })
+  check(reg.includes('已接入') && reg.includes('设置'), `注册成功 → 「${reg}」`)
+
+  const unreg = settingsRowValue({ settings: { registered: false, live: false, service: true, note: '设置页未注册：shell 不能为空' } })
+  check(unreg.includes('未注册') && unreg.includes('shell 不能为空'),
+    `注册失败 → 如实带原因：「${unreg}」—— 不能显示成「已接入」`)
+
+  // 老宿主（0.1.2 之前 /list 没有 settings 字段）：只能写「未知」，不许猜
+  const old = settingsRowValue({ socket: 'dsh-agent' })
+  check(old.includes('未知') && old.includes('重启'), `旧宿主未上报 → 「${old}」`)
+
+  // 中间态：只有 live（0.1.2 加 registered 之前的宿主）
+  const legacy = settingsRowValue({ settings: { live: true, note: '可在 DSH 设置 → 插件 里修改' } })
+  check(legacy.includes('已接入'), `只有 live=true 的旧宿主仍判为已接入：「${legacy}」`)
+
+  const title = plugin.__settingsRowTitle
+  check(title({ settings: { registered: true } }) === '' && title({ settings: { registered: false, note: 'x' } }) === 'x',
+    '悬停说明只在未注册时给出原因')
+}
+
 const scrollAnchor = plugin?.__scrollAnchor
 const contentShift = plugin?.__contentShift
 check(typeof scrollAnchor === 'function' && typeof contentShift === 'function', '滚动锚定 scrollAnchor / contentShift 已暴露')
