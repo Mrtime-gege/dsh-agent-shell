@@ -101,11 +101,31 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   const tools = new Map()
   const routes = new Map()
   const logs = []
+
+  // 可选：假的 ctx.settings（官方 installSection 契约）。用来验证「服务在 → 注册并热更；
+  // 服务不在 → 退回组合配置仍能工作」两条路径，而不必真去起一个 DSH。
+  let settingsSource = () => config
+  const settingsChanges = []
+  const settingsRegistrations = []
+  let settingsHooks = null
+  const settings = config.__withSettings === true
+    ? {
+        installSection (owner, ns, schema, entry, hooks) {
+          settingsRegistrations.push({ ns, entry })
+          settingsHooks = hooks
+          hooks.setSource(() => settingsSource())
+          hooks.onChange()
+          return () => {}
+        },
+      }
+    : undefined
   const webServer = { register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) } }
   const effect = (cb) => cb()
   const base = String(config.httpBase ?? '/plugins/shell')
+  const services = { subprocess, timer }
+  if (settings !== undefined) services.settings = settings
   const ctx = {
-    get: (name) => ({ subprocess, timer })[name],
+    get: (name) => ({ subprocess, timer, settings })[name],
     effect,
     on: () => () => {},
     logger: { log: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')) },
@@ -164,7 +184,22 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
     defaultTerminal: 'tmux-256color', cwd: '/', pidFile: `/tmp/${socket}-watchdog.pid`,
   })
 
-  return { pkgDir, tools, routes, run, call, driver, tmux, cleanup, logs, subprocess, timer }
+  /**
+   * 模拟用户在 DSH 设置页改了配置：换掉 source 并触发 onChange。
+   * 只在 `config.__withSettings === true` 时可用。
+   */
+  const changeSettings = (next) => {
+    if (settings === undefined || settingsHooks === null) {
+      throw new Error('测试未启用假 settings 服务（传 __withSettings: true）')
+    }
+    settingsSource = () => ({ ...config, ...next, __withSettings: true })
+    settingsChanges.push(next)
+    settingsHooks.onChange()      // 等价于用户在设置页保存后服务发出的通知
+    return settings
+  }
+
+  return { pkgDir, tools, routes, run, call, driver, tmux, cleanup, logs, subprocess, timer,
+    settings, settingsRegistrations, changeSettings, reloadConfig: () => config }
 }
 
 /** 断言器：收集失败而不是立刻抛出，跑完一次性汇报。 */

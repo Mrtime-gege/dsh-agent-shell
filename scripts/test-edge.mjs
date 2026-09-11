@@ -33,7 +33,7 @@ if (!existsSync(tgz)) {
 
 console.log(`peer 来自 ${peersDir}\n测试产物 ${tgz}\n`)
 
-const h = await makeHarness({ tgz, peersDir, socket: SOCKET, config: { maxSessions: 3 } })
+const h = await makeHarness({ tgz, peersDir, socket: SOCKET, config: { maxSessions: 3, __withSettings: true } })
 const { run, call, tmux } = h
 const { check, rejects, report } = makeChecker()
 
@@ -266,6 +266,44 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(renameGhost.code >= 400, `rename 不存在的会话 → ${renameGhost.code}`)
   const big = await call('/keys', 'POST', { __raw: JSON.stringify({ name: 'x', text: 'y'.repeat(1024 * 1024 + 100) }) })
   check(big.code >= 400, `超过 1MB 的请求体被丢弃并报错 → ${big.code}`)
+}
+
+/* ── 7.5 设置功能：注册官方 namespace，改动立即生效或如实说明需重启 ─────────── */
+
+{
+  check(h.settingsRegistrations.length === 1, `注册了 1 个 settings namespace（实际 ${h.settingsRegistrations.length}）`)
+  const reg = h.settingsRegistrations[0]
+  check(reg !== undefined && reg.ns === 'dsh-agent-shell', `namespace 名 = ${reg ? reg.ns : '(未注册)'}`)
+  check(reg !== undefined && reg.entry !== undefined && reg.entry.maxSessions === 3,
+    `组合配置被当作 base 层传入：maxSessions=${reg ? reg.entry.maxSessions : '-'}`)
+
+  let list = (await call('/list', 'GET')).body.server
+  check(list.settings !== undefined && list.settings.live === true, `面板能看到设置已接入：${JSON.stringify(list.settings)}`)
+  check(list.settings.namespace === 'dsh-agent-shell', `面板显示 namespace：${list.settings.namespace}`)
+
+  // 1) 可热更项：maxSessions 3 → 1，应当**立刻**受限
+  //    注意先建一个会话 —— 上限判定是「已有数 >= 上限」，空着的时候第一个当然允许。
+  const first = await call('/new', 'POST', { name: 'within-limit' })
+  check(first.code === 200, `改设置前先建一个会话 → HTTP ${first.code}`)
+  h.changeSettings({ maxSessions: 1 })
+  const limited = await call('/new', 'POST', { name: 'over-limit' })
+  check(limited.code >= 400 && String(JSON.stringify(limited.body)).includes('limit'),
+    `改完 maxSessions=1 后立刻拒绝第 2 个会话 → HTTP ${limited.code} ${JSON.stringify(limited.body).slice(0, 60)}`)
+  list = (await call('/list', 'GET')).body.server
+  check(list.maxSessions === 1, `服务端信息里的 maxSessions 已更新为 ${list.maxSessions}`)
+  check(String(list.settings.note).includes('立即生效'), `立刻生效类改动如实报告：${list.settings.note}`)
+  await run('shell_close', { session: 'dsh-within-limit' })
+
+  // 2) 需重启项：historyLimit 写进 tmux 启动配置，必须明说「要重启」
+  h.changeSettings({ maxSessions: 3, historyLimit: 12345 })
+  list = (await call('/list', 'GET')).body.server
+  check(String(list.settings.note).includes('重启') && String(list.settings.note).includes('historyLimit'),
+    `需重启类改动如实报告：${list.settings.note}`)
+  const diagText2 = await run('shell_diagnose', {})
+  check(diagText2.includes('settings namespace: dsh-agent-shell'), 'shell_diagnose 也报告设置来源')
+
+  // 3) 改回默认，免得影响后续小节
+  h.changeSettings({ maxSessions: 3, historyLimit: 100000 })
 }
 
 /* ── 8. 生命周期与自愈（本文件只做不依赖 harness 的部分）──────────────────── */

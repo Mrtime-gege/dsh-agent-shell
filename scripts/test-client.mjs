@@ -42,6 +42,10 @@ const react = {
 const loaded = []
 const context = {
   console,
+  // 组件里会发起 HTTP（api()）：给一个永不 resolve 的 fetch，
+  // 这样遍历事件处理器时同步部分照跑，又不会产生 unhandled rejection。
+  fetch: () => new Promise(() => {}),
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
   require: (id) => {
     if (id === 'react') return react
     throw new Error(`客户端不该 require(${id})：它在浏览器里只被允许拿 react`)
@@ -314,6 +318,146 @@ if (typeof infoRows === 'function') {
   const guardRow = bare.find((r) => r.startsWith('危险命令护栏='))
   check(extRow !== undefined && extRow.includes('未知'), `未上报时 extended-keys 显示未知：${extRow}`)
   check(guardRow !== undefined && guardRow.includes('未知'), `未上报时护栏状态显示未知：${guardRow}`)
+}
+
+/* ── 组件渲染 + 事件处理器遍历（抓「只在打开面板时才炸」的错误）──────────────── */
+
+const ShellPanel = plugin?.__ShellPanel
+check(typeof ShellPanel === 'function', '组件 __ShellPanel 已暴露')
+
+if (typeof ShellPanel === 'function') {
+  // 假 React：只实现组件真正用到的四个 API（useState/useRef/useEffect/createElement）。
+  // 目的不是渲染出 DOM，而是把组件跑一遍并把每个事件处理器都调一次。
+  const makeFakeReact = () => {
+    const cells = []
+    let cursor = 0
+    const hooks = {
+      createElement: (type, props, ...children) => ({
+        type, props: props === null || props === undefined ? {} : props, children: children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false),
+      }),
+      Fragment: 'Fragment',
+      useState: (init) => {
+        const i = cursor++
+        if (!(i in cells)) cells[i] = typeof init === 'function' ? init() : init
+        return [cells[i], (next) => { cells[i] = typeof next === 'function' ? next(cells[i]) : next }]
+      },
+      useRef: (init) => { const i = cursor++; if (!(i in cells)) cells[i] = { current: init }; return cells[i] },
+      useEffect: () => { cursor++ },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      createContext: () => ({ Provider: 'P', Consumer: 'C' }),
+      useContext: () => ({}),
+    }
+    return {
+      hooks,
+      size: () => cells.length,
+      reset: () => { cursor = 0 },
+      /**
+       * 把某个 **state** 单元换成候选值（用来把「展开 / 详情」等内部状态打开）。
+       * 必须跳过 useRef 的 `{ current }` 单元 —— 把 ref 换成垃圾值会让处理器读到
+       * undefined（那是测试自己造的错，不是插件的错，第一版就误报了 4 条）。
+       */
+      patch: (index, candidates) => {
+        const value = cells[index]
+        const isRef = value !== null && typeof value === 'object' && !Array.isArray(value) &&
+          'current' in value && Object.keys(value).length === 1
+        if (isRef) return
+        cells[index] = typeof value === 'boolean' ? true : candidates[index % candidates.length]
+      },
+    }
+  }
+
+  const fake = makeFakeReact()
+  const savedRequire = context.require
+  context.require = (id) => (id === 'react' ? fake.hooks : savedRequire(id))
+  // 让模块工厂用假 React 重新拿一次组件
+  let panel = null
+  try {
+    fake.reset()
+    panel = loaded[0].factory(context.require).__ShellPanel
+  } catch (error) {
+    check(false, `用假 React 重建组件失败：${String(error && error.message ? error.message : error)}`)
+  }
+  context.require = savedRequire
+
+  if (typeof panel === 'function') {
+    // 第一遍：折叠态（初始渲染）——必须不抛错
+    let tree = null
+    let renderError = ''
+    try {
+      fake.reset()
+      tree = panel()
+    } catch (error) {
+      renderError = String(error && error.message ? error.message : error)
+    }
+    check(renderError === '', `折叠态渲染不抛错${renderError === '' ? '' : ' —— ' + renderError}`)
+
+    const walk = (node, out) => {
+      if (Array.isArray(node)) { node.forEach((n) => walk(n, out)); return }
+      if (node === null || typeof node !== 'object') return
+      const props = node.props || {}
+      for (const [key, value] of Object.entries(props)) {
+        if (key.startsWith('on') && typeof value === 'function') out.push({ key, value, className: props.className })
+      }
+      walk(node.children, out)
+    }
+    const collect = (t) => { const out = []; walk(t, out); return out }
+    check(collect(tree).length > 0, `折叠态有 ${collect(tree).length} 个事件处理器`)
+
+    // 第二遍：把内部 state 单元统统“打开”再渲染一次 —— 展开态、选择器、ⓘ 详情层
+    // 里的代码（包括刚写的复制逻辑）才算真正跑到。
+    const candidate = (name) => ({
+      get: (target, key) => {
+        if (key === Symbol.toPrimitive) return () => name
+        if (key === 'then' || key === Symbol.iterator) return undefined
+        if (key === 'length') return 1
+        return candidate(String(key))
+      },
+      has: () => true,
+    })
+    const candidates = [
+      candidate('x'),
+      [{ name: 'dsh-x', cols: 80, rows: 24, foreground: 'bash', historySize: 1, historyLimit: 2, historyBytes: 3, attached: false }],
+      [{ name: 'dsh-x', cols: 80, rows: 24, foreground: 'bash', historyBytes: 3 }],
+      'x',
+      1,
+    ]
+
+    // 先把每个 state 单元都“打开”（布尔→true、null→像数据的候选值），再渲染一次。
+    // 注意不能「渲染成功就跳出」——那样永远打不到补丁（第一版就踩了这个坑）。
+    const cellsBefore = fake.size()
+    for (let i = 0; i < cellsBefore; i += 1) fake.patch(i, candidates)
+
+    let expanded = null
+    let expandedError = ''
+    try {
+      fake.reset()
+      expanded = panel()
+    } catch (error) {
+      expandedError = String(error && error.message ? error.message : error)
+    }
+    check(expanded !== null, `打开内部状态后仍能渲染（打了 ${cellsBefore} 个 state 单元）${expanded === null ? ' —— ' + expandedError : ''}`)
+
+    const handlers = collect(expanded)
+    check(handlers.length > 12, `展开+详情态共有 ${handlers.length} 个事件处理器（覆盖 ⓘ 里的复制等）`)
+
+    const failures = []
+    for (const handler of handlers) {
+      try {
+        fake.reset()
+        handler.value({
+          preventDefault () {}, stopPropagation () {},
+          key: 'x', code: 'KeyX', keyCode: 88, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
+          target: { value: '' }, currentTarget: { value: '', select () {}, setPointerCapture () {}, releasePointerCapture () {} },
+          relatedTarget: null, nativeEvent: {},
+          clientX: 0, clientY: 0, pointerId: 1,
+        })
+      } catch (error) {
+        failures.push(`${handler.className || '?'}.${handler.key}: ${String(error && error.message ? error.message : error)}`)
+      }
+    }
+    check(failures.length === 0, `所有处理器的同步部分都能跑${failures.length === 0 ? '' : ' —— ' + failures.slice(0, 4).join(' | ')}`)
+  }
 }
 
 const total = checks + keyCases.length + orders.length
