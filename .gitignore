@@ -1,0 +1,30 @@
+# 依赖（本仓库没有 lockfile，也不提交依赖树）
+node_modules/
+.npm/
+
+# 打包产物
+*.tgz
+coverage/
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 编辑器 —— 整目录忽略，仓库不携带编辑器配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地临时目录与实验产物
+tmp/
+.tmp/

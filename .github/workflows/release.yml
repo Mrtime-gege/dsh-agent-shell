@@ -1,0 +1,145 @@
+# 发布：推 `v*` tag → 校验版本一致 → 发布到 npm → 用 CHANGELOG 段落创建 GitHub Release。
+#
+# 触发前提（三者必须一致）：
+#   * `package.json` 的 `version`      —— 例如 0.1.0
+#   * `CHANGELOG.md` 里 `## 0.1.0 …` 的段落（`npm run release:check` 会校验）
+#   * 推上去的 tag                     —— 例如 v0.1.0（本流程会校验去掉 `v` 后等于版本号）
+#
+# ── 两条发布路线，本文件同时支持，走哪条都不需要改动它 ──────────────────────────────
+#
+# 路线 A（仓库里配置了 `NPM_TOKEN` secret）：用长期 token 发布。
+#   建议用 npm 的 **Granular Access Token**，权限 `Read and write`、Packages 只限本包、
+#   有效期尽量短。长期 token 存在仓库里始终是风险点：一旦泄漏，或被 Actions 日志／
+#   第三方 action 读走，任何人都能以你的名义发布。
+#
+# 路线 B（**没有** `NPM_TOKEN`）：自动改走 npm 的 **Trusted Publisher（OIDC）**。
+#   在 npm 包页面 → Settings → Trusted Publisher 登记本仓库与 workflow 文件名 `release.yml`
+#   （本文件已声明 `id-token: write`），然后把仓库里的 `NPM_TOKEN` secret **删掉**即可 ——
+#   不需要改本文件。npm 会用 GitHub 的 OIDC 身份换取一次性短期凭据，仓库里不再留下任何
+#   可复用的发布密钥。注意 OIDC 需要 npm >= 11.5.1，所以下面有一步显式升级 npm。
+#
+# 详见 PUBLISHING.md 的 4.1 / 4.4。
+# ─────────────────────────────────────────────────────────────────────────────────
+#
+# 注意：`npm publish` 一旦成功，同一个版本号无法重发（npm 不允许覆盖已发布版本）。
+# 因此本流程把校验放在发布之前；若发布成功但后续建 Release 失败，重跑会 401，
+# 此时应当手工补建 Release，而不是重发版本。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # 创建 GitHub Release
+  id-token: write # npm provenance 与 Trusted Publisher（OIDC）
+
+jobs:
+  publish:
+    name: 发布到 npm 并建 Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出（含全部历史与 tag）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置 Node 与 npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 确保 npm 版本满足发布要求
+        run: |
+          # provenance 自 npm 9.5 起可用；Trusted Publisher（OIDC）需要 npm >= 11.5.1。
+          # Node 20 自带的 npm 是 10.x，所以这里显式升到 11。
+          npm install -g 'npm@^11'
+          npm -v
+
+      - name: 校验 tag 与 package.json 版本一致
+        id: version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 的版本 ${pkg_version} 不一致；请改回一致后重新打 tag。"
+            exit 1
+          fi
+          echo "版本校验通过：${GITHUB_REF_NAME} == ${pkg_version}"
+          echo "version=${pkg_version}" >> "$GITHUB_OUTPUT"
+
+      - name: 语法检查
+        run: npm run check
+
+      - name: 发布不变量检查
+        run: npm run release:check
+
+      - name: 选择发布凭据（配了 NPM_TOKEN 用 token，没配则用 OIDC）
+        id: creds
+        env:
+          # 只在这一步把 secret 放进环境，避免其它步骤（含第三方 action）拿到它。
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NPM_TOKEN}" ]; then
+            echo "mode=token" >> "$GITHUB_OUTPUT"
+            echo "使用仓库 secret NPM_TOKEN 发布。"
+          else
+            echo "mode=oidc" >> "$GITHUB_OUTPUT"
+            echo "未配置 NPM_TOKEN，改走 Trusted Publisher（OIDC）发布。"
+          fi
+
+      - name: 发布到 npm（用仓库 secret NPM_TOKEN）
+        if: steps.creds.outputs.mode == 'token'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 发布到 npm（用 npm Trusted Publisher / OIDC）
+        if: steps.creds.outputs.mode == 'oidc'
+        env:
+          # setup-node 生成的用户级 .npmrc 里有一行 `_authToken=${NODE_AUTH_TOKEN}`。
+          # 走 OIDC 时必须让 npm 完全依赖 GitHub 的 OIDC 身份，因此换一份干净的 userconfig，
+          # 只留 registry，不出现任何 token 行。
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc-oidc
+        run: |
+          printf 'registry=https://registry.npmjs.org/\n' > "${NPM_CONFIG_USERCONFIG}"
+          npm publish --provenance --access public
+
+      - name: 从 CHANGELOG 抽取本版段落
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -e
+          # 与 scripts/release-check.mjs 的判定保持一致：以 "## " 开头且包含版本号的行为段落起点。
+          start="$(grep -n '^## ' CHANGELOG.md | grep -F "${VERSION}" | head -1 | cut -d: -f1)"
+          if [ -z "${start}" ]; then
+            echo "::error::CHANGELOG.md 里找不到 ${VERSION} 的段落（应以 \"## ${VERSION}\" 开头）"
+            exit 1
+          fi
+          # 下一段标题（若有）就是本段落的结束位置；行号相对 tail 的起点，故换算成相对行数。
+          next="$(tail -n "+$((start + 1))" CHANGELOG.md | grep -n '^## ' | head -1 | cut -d: -f1)"
+          if [ -n "${next}" ]; then
+            tail -n "+$((start + 1))" CHANGELOG.md | head -n "$((next - 1))" > /tmp/release-notes.md
+          else
+            tail -n "+$((start + 1))" CHANGELOG.md > /tmp/release-notes.md
+          fi
+          if [ ! -s /tmp/release-notes.md ]; then
+            echo "本次发布详见 CHANGELOG.md。" > /tmp/release-notes.md
+          fi
+          echo "── Release 说明预览 ──"
+          cat /tmp/release-notes.md
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "::error::Release ${GITHUB_REF_NAME} 已存在。请勿重发版本；直接编辑既有 Release 的说明即可。"
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file /tmp/release-notes.md

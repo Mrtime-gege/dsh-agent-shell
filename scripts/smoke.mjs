@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+/**
+ * 发布物冒烟测试：把**真实打包产物**解包，用一个假宿主 ctx 跑起来。
+ *
+ * 与「读源码」或「起一个 DSH」都不同，它验证的是**用户真正会装到的东西**：
+ *
+ *   1. `npm pack` 的产物里该有的文件都在（漏了 `cordis.patch.yml` 或入口，用户就装不起来）；
+ *   2. 包在「不带自己的 node_modules、依赖靠上层解析」的真实形态下能 import；
+ *   3. `apply()` 在假 ctx 上不抛错，且真的注册出 9 个工具与 8 条 HTTP 路由；
+ *   4. 工具与 HTTP 两条路径都能驱动**真实 tmux**：建会话、发按键、读屏、改名、关闭；
+ *   5. `extendedKeys` 之类的配置真的写进了服务端启动配置，且不影响服务端存活。
+ *
+ * 用法：
+ *
+ *   npm run smoke                      # 自己 npm pack 到临时目录再测（最省事）
+ *   node scripts/smoke.mjs <tgz> [peer 目录]
+ *   node scripts/smoke.mjs - [peer 目录]   # 显式要求自动打包
+ *
+ * peer 目录（含 `@deepseek-ai/dsh-tools`、`cordis`、`schemastery` 的 `node_modules` 的父目录，
+ * 通常就是 DSH 部署根或某个 profile 的 node_modules）按以下顺序确定：
+ *   argv[3] → 环境变量 `DSH_PEERS_DIR` → 从当前目录向上用 Node 解析。
+ *
+ * 找不到 peer 时**跳过**（退出码 0），除非设了 `SMOKE_REQUIRE=1` —— 那时视为失败，
+ * 免得 CI 因为没装 peer 而「静默通过」。
+ *
+ * 会在私有 socket（默认 `dsh-smoke`）上起真 tmux，结束时一定清掉；不碰你自己的 tmux。
+ */
+
+import { spawn, execFileSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+
+const SOCKET = 'dsh-smoke'
+const BASE = '/plugins/shell'
+const PEER_PACKAGES = ['dsh-tools', 'cordis', 'schemastery']
+
+/* ---------- 取打包产物（不给就自己打一个） ---------- */
+
+function packIntoTemp () {
+  const destination = mkdtempSync(join(tmpdir(), 'dsh-smoke-tgz-'))
+  const name = execFileSync('npm', ['pack', '--pack-destination', destination, '--silent'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  }).trim().split('\n').pop()
+  return join(destination, name)
+}
+
+const givenTgz = process.argv[2]
+const tgz = (givenTgz === undefined || givenTgz === '-') ? packIntoTemp() : givenTgz
+if (!existsSync(tgz)) {
+  console.error(`找不到打包产物：${tgz}\n先执行 npm pack，或不带参数运行本脚本让它自己打包。`)
+  process.exit(2)
+}
+
+/* ---------- 定位 peer ---------- */
+
+function peersFrom (target) {
+  // target 是某个 node_modules 的父目录，或 node_modules 自身
+  for (const candidate of [join(target, 'node_modules'), target]) {
+    if (PEER_PACKAGES.every(p => existsSync(join(candidate, '@deepseek-ai', p)))) return candidate
+  }
+  return null
+}
+
+function resolvePeers () {
+  if (process.argv[3] !== undefined) return peersFrom(process.argv[3])
+  if (process.env.DSH_PEERS_DIR !== undefined) return peersFrom(process.env.DSH_PEERS_DIR)
+  try {
+    const require = createRequire(join(process.cwd(), 'noop.js'))
+    const found = require.resolve('@deepseek-ai/dsh-tools/package.json')
+    // .../node_modules/@deepseek-ai/dsh-tools/package.json → .../node_modules
+    return dirname(dirname(dirname(found)))
+  } catch { return null }
+}
+
+const peers = resolvePeers()
+if (peers === null) {
+  const message = [
+    '跳过冒烟测试：找不到宿主 peer（@deepseek-ai/{dsh-tools,cordis,schemastery}）。',
+    '  · 用 DSH 部署目录跑：node scripts/smoke.mjs <tgz> /path/to/dsh-webui',
+    '  · 或先装 peer：npm i --no-save @deepseek-ai/dsh-tools@0.1.2-rc.1 @deepseek-ai/cordis@4.0.2 @deepseek-ai/schemastery@3.18.2',
+  ].join('\n')
+  if (process.env.SMOKE_REQUIRE === '1') { console.error(message); process.exit(1) }
+  console.log(message)
+  process.exit(0)
+}
+
+/* ---------- 解包到临时目录，只链 peer ---------- */
+
+try { execFileSync('tmux', ['-L', SOCKET, 'kill-server'], { stdio: 'ignore' }) } catch { /* 本来就没起 */ }
+
+const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
+const linkDir = join(root, 'node_modules', '@deepseek-ai')
+mkdirSync(linkDir, { recursive: true })
+for (const p of PEER_PACKAGES) symlinkSync(join(peers, '@deepseek-ai', p), join(linkDir, p), 'dir')
+execFileSync('tar', ['-xzf', tgz, '-C', root])
+const pkgDir = join(root, 'package')
+console.log(`peer 来自 ${peers}\n解包到 ${pkgDir}\n`)
+
+const cleanup = () => {
+  try { rmSync(root, { recursive: true, force: true }) } catch { /* 忽略 */ }
+  try { execFileSync('tmux', ['-L', SOCKET, 'kill-server'], { stdio: 'ignore' }) } catch { /* 已无服务端 */ }
+  try { rmSync(`/tmp/${SOCKET}-tmux.conf`, { force: true }) } catch { /* 忽略 */ }
+}
+process.on('exit', cleanup)
+process.on('SIGINT', () => { cleanup(); process.exit(130) })
+
+/* ---------- 假宿主 ctx ---------- */
+
+const subprocess = {
+  spawn ({ argv, cwd }) {
+    const [cmd, ...args] = argv
+    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+    const out = []; const err = []
+    child.stdout.on('data', c => out.push(c))
+    child.stderr.on('data', c => err.push(c))
+    const done = new Promise((resolve) => {
+      child.on('close', code => resolve({ exitCode: code ?? -1 }))
+      child.on('error', () => resolve({ exitCode: -1 }))
+    })
+    return {
+      done,
+      collected: {
+        stdout: { readFrom: () => ({ text: Buffer.concat(out).toString('utf8') }) },
+        stderr: { readFrom: () => ({ text: Buffer.concat(err).toString('utf8') }) },
+      },
+    }
+  },
+}
+const timer = { timeout: (ms) => new Promise(resolve => setTimeout(resolve, ms)) }
+
+const tools = new Map()
+const routes = new Map()
+const webServer = { register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) } }
+const effect = (cb) => cb()
+const ctx = {
+  get: (name) => ({ subprocess, timer })[name],
+  effect,
+  on: () => () => {},
+  logger: console,
+  tools: { register: (def) => { tools.set(def.name, def); return () => {} } },
+  inject: (names, cb) => {
+    if (!names.includes('webServer')) return
+    cb({ get: (n) => (n === 'webServer' ? webServer : undefined), webServer, effect })
+  },
+}
+
+/* ---------- 断言 ---------- */
+
+const problems = []
+const check = (ok, label) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) problems.push(label) }
+const call = async (path, method, body) => {
+  const routePath = `${BASE}${path.split('?')[0]}`
+  const handler = routes.get(routePath)
+  if (handler === undefined) throw new Error(`路由不存在：${routePath}`)
+  const req = { url: path, method, headers: {}, socket: { remoteAddress: '127.0.0.1' }, on: () => {}, destroy () {} }
+  if (method !== 'GET') {
+    req.on = (ev, fn) => {
+      if (ev === 'data') fn(Buffer.from(JSON.stringify(body ?? {})))
+      if (ev === 'end') fn()
+    }
+  }
+  const res = { _code: 0, _body: '', writeHead (c) { this._code = c }, end (p) { this._body = p ?? '' } }
+  await handler(req, res)
+  let parsed; try { parsed = JSON.parse(res._body) } catch { parsed = res._body }
+  return { code: res._code, body: parsed }
+}
+const run = async (name, args) => {
+  const tool = tools.get(name)
+  if (tool === undefined) throw new Error(`工具不存在：${name}`)
+  const value = await tool.execute(args, {})
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+/* ---------- 走一遍 ---------- */
+
+const mod = await import(join(pkgDir, 'lib', 'index.js'))
+console.log(`导出：${Object.keys(mod).sort().join(', ')}\n`)
+check(mod.name === 'dsh-agent-shell', `插件名 = ${mod.name}`)
+
+mod.apply(ctx, { socket: SOCKET, httpBase: BASE, watchdog: false, exposeHttp: true, exposeTools: true, extendedKeys: true })
+
+check(tools.size === 9, `注册工具数 = ${tools.size}（期望 9）`)
+check(routes.size === 8, `注册 HTTP 路由数 = ${routes.size}（期望 8）`)
+
+await new Promise(r => setTimeout(r, 300))
+const conf = readFileSync(`/tmp/${SOCKET}-tmux.conf`, 'utf8')
+check(conf.includes('extended-keys on'), 'extendedKeys: true 已写进服务端启动配置')
+
+const opened = await run('shell_open', { name: 'smoke', cols: 90, rows: 24 })
+const session = (opened.match(/session (\S+)/) ?? [])[1]
+check(session === 'dsh-smoke', `shell_open → ${session}`)
+
+await run('shell_send', { session, text: 'echo SMOKE-$((6*7))', keys: ['Enter'], settleMs: 500 })
+let read = await run('shell_read', { session })
+check(read.includes('SMOKE-42'), 'shell_send + shell_read 拿到结果')
+
+let rejected = ''
+try { await run('shell_send', { name: session, text: 'echo NOPE', keys: ['Enter'] }) } catch (error) { rejected = String(error?.name ?? error) }
+check(rejected === 'ToolArgsError', `工具路径传 name 被参数校验拦下（${rejected || '没拦'}）`)
+
+await call('/keys', 'POST', { name: session, text: 'echo HTTP-$((100-58))', keys: ['Enter'] })
+await new Promise(r => setTimeout(r, 900))
+read = await call(`/screen?name=${session}&lines=40`, 'GET')
+check(read.body?.screen?.includes('HTTP-42'), 'HTTP 路径（请求体用 name）同样可用')
+
+const hist = await run('shell_history', { session, lines: 60 })
+check(hist.includes('SMOKE-42'), 'shell_history 能读到滚出屏幕的内容')
+
+const listed = await run('shell_list', {})
+check(listed.includes('dsh-smoke'), 'shell_list 列出该会话')
+
+const renamed = await run('shell_rename', { session, newName: 'renamed' })
+check(renamed.includes('dsh-renamed'), `shell_rename → ${renamed.trim()}`)
+
+const resized = await run('shell_resize', { session: 'dsh-renamed', cols: 100, rows: 30 })
+check(resized.length > 0, 'shell_resize 有返回')
+
+check((await run('shell_diagnose', {})).length > 0, 'shell_diagnose 有输出')
+
+const created = await call('/new', 'POST', { name: 'http', cols: 80, rows: 24 })
+check(created.code === 200 && created.body?.name === 'dsh-http', `POST /new → ${created.code} ${created.body?.name}`)
+
+const list = await call('/list', 'GET')
+check(list.body?.sessions?.length === 2, `GET /list → ${list.body?.sessions?.length} 个会话`)
+
+const viaHttp = await call('/rename', 'POST', { name: 'dsh-http', newName: 'http2' })
+check(viaHttp.body?.name === 'dsh-http2', `POST /rename → ${viaHttp.body?.name ?? JSON.stringify(viaHttp.body)}`)
+
+check((await run('shell_close', { session: 'dsh-renamed' })).includes('closed'), 'shell_close 生效')
+check((await run('shell_close', { session: 'dsh-http2' })).includes('closed'), 'shell_close 第二个会话')
+
+const empty = await call('/list', 'GET')
+check(empty.body?.sessions?.length === 0, `收尾：剩 ${empty.body?.sessions?.length} 个会话`)
+
+console.log(problems.length === 0
+  ? '\n冒烟测试通过：打包产物可加载、可注册、可驱动真实 tmux。'
+  : `\n冒烟测试失败，共 ${problems.length} 项：\n  - ${problems.join('\n  - ')}`)
+process.exit(problems.length === 0 ? 0 : 1)

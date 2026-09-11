@@ -1,0 +1,94 @@
+# 持续集成：语法检查 → 发布不变量检查 → 打包试运行。
+#
+# 为什么不用 setup-node 的 `cache: npm`：本仓库**没有 lockfile**（没有构建步骤，也没有
+# devDependencies，依赖只有 peerDependencies），缓存步骤会因为找不到 lockfile 直接失败。
+# 同理这里不能用 `npm ci` / `npm install` —— 也不需要：`npm run check` 与
+# `npm run release:check` 只依赖 Node 标准库。
+#
+# tmux 只被「宿主半脱离 DSH 验证」用到，而那是人工步骤，所以安装失败不阻塞流水线。
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 语法与发布不变量（Node ${{ matrix.node }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - '20'
+          - '22'
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 配置 Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 安装 tmux（可选，失败不阻塞）
+        run: |
+          sudo apt-get update -qq || true
+          if sudo apt-get install -y tmux; then
+            tmux -V
+          else
+            echo "::warning::tmux 安装失败；依赖 tmux 的人工验证请在本机进行，本流水线继续。"
+          fi
+
+      - name: 语法检查
+        run: |
+          node -v
+          npm run check
+
+      - name: 发布不变量检查
+        run: npm run release:check
+
+      - name: 打包试运行（确认发布物内容）
+        run: npm pack --dry-run
+
+  smoke:
+    name: 打包产物冒烟测试（真实 tmux）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 配置 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 下面两步都「允许失败」：它们失败是环境问题，不是本仓库的缺陷。
+      # 但一旦真装上了，冒烟测试就必须通过（SMOKE_REQUIRE=1），不允许静默跳过。
+      - name: 安装 tmux
+        id: tmux
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tmux
+          tmux -V
+
+      - name: 安装宿主 peer（从公共 registry 拉真实版本）
+        id: peers
+        continue-on-error: true
+        run: |
+          npm install --no-save --no-package-lock \
+            @deepseek-ai/dsh-tools@0.1.2-rc.1 \
+            @deepseek-ai/cordis@4.0.2 \
+            @deepseek-ai/schemastery@3.18.2
+
+      - name: 冒烟测试（打包产物 → 假 ctx → 真实 tmux）
+        if: steps.tmux.outcome == 'success' && steps.peers.outcome == 'success'
+        env:
+          SMOKE_REQUIRE: '1'
+        run: npm run smoke
