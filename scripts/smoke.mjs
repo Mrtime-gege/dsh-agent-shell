@@ -198,8 +198,8 @@ check(mod.name === 'dsh-agent-shell', `插件名 = ${mod.name}`)
 
 mod.apply(ctx, { socket: SOCKET, httpBase: BASE, watchdog: true, exposeHttp: true, exposeTools: true, extendedKeys: true })
 
-check(tools.size === 9, `注册工具数 = ${tools.size}（期望 9）`)
-check(routes.size === 8, `注册 HTTP 路由数 = ${routes.size}（期望 8）`)
+check(tools.size === 10, `注册工具数 = ${tools.size}（期望 9）`)
+check(routes.size === 9, `注册 HTTP 路由数 = ${routes.size}（期望 8）`)
 
 await new Promise(r => setTimeout(r, 300))
 const conf = readFileSync(`/tmp/${SOCKET}-tmux.conf`, 'utf8')
