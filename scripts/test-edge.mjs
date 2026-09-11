@@ -579,6 +579,43 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   hCwd.cleanup()
 }
 
+/* ── 7.96 设置卡片的宿主侧接口（卡片读写都走它）───────────────────────────── */
+
+{
+  const got = await call('/settings', 'GET')
+  check(got.code === 200 && Array.isArray(got.body.fields), `GET /settings → HTTP ${got.code}`)
+  const fields = got.body.fields ?? []
+  check(fields.length >= 20, `字段表带出了 ${fields.length} 个可设置项`)
+  check(fields.every((f) => typeof f.description === 'string' && f.description.length > 0),
+    '每个字段都带描述（卡片直接显示它 —— 没有描述就只是个光秃秃的键名）')
+  const restart = fields.filter((f) => f.restartRequired === true).map((f) => f.key)
+  check(['socket', 'historyLimit', 'extendedKeys'].every((k) => restart.includes(k)),
+    `需重启的项被标出来：${restart.join(',')}`)
+  check(fields.some((f) => f.key === 'requireConsent' && f.type === 'boolean'),
+    '布尔项类型正确（卡片据此渲染开关）')
+  // 卡片显示的就是宿主给的结论，三种形态都合法：尚未修改 / 已立即生效 / 需重启某些项
+  const note = String(got.body.note ?? '')
+  check(note !== '' && /尚未修改|立即生效|要重启/.test(note), `卡片能显示宿主的结论：${note}`)
+
+  // 写入：合法值 → 保存并回报结论；非法值 → 400 且给出范围（与设置页同一套校验）
+  const ok = await call('/settings', 'POST', { patch: { maxSessions: 2 } })
+  check(ok.code === 200 && ok.body.ok === true, `POST /settings 合法改动 → HTTP ${ok.code}`)
+  check(String(ok.body.note ?? '').includes('立即生效'), `回报「立即生效」：${ok.body.note}`)
+  const after = (await call('/list', 'GET')).body.server.maxSessions
+  check(after === 2, `改动真的生效了：maxSessions=${after}`)
+
+  const bad = await call('/settings', 'POST', { patch: { cols: 9999 } })
+  check(bad.code === 400 && String(bad.body.error ?? '').includes('20–1000'),
+    `非法值被挡下并给出范围：HTTP ${bad.code} ${String(bad.body.error ?? '').slice(0, 40)}`)
+  const restartCase = await call('/settings', 'POST', { patch: { historyLimit: 54321 } })
+  check(restartCase.code === 200 && String(restartCase.body.note ?? '').includes('重启'),
+    `需重启的项如实回报：${restartCase.body.note}`)
+  await call('/settings', 'POST', { patch: { maxSessions: 3, historyLimit: 100000 } })
+
+  const noPatch = await call('/settings', 'POST', {})
+  check(noPatch.code === 400, `缺 patch → 400（而不是 500）：HTTP ${noPatch.code}`)
+}
+
 /* ── 7.935 面板的 /screen 必须给出**完整窗格**，否则光标几何算不出来 ─────────── */
 
 {

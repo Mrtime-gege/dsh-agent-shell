@@ -410,6 +410,28 @@ if (typeof auditRowValue === 'function') {
   check(tmuxRowValue({}).includes('未知'), '体检未完成/旧宿主 → 未知')
 }
 
+/* ── 设置卡片：DSH 设置页只渲染「宿主 namespace ∩ 卡片」的交集 ─────────────── */
+
+const SettingsCard = plugin?.__SettingsCard
+const CARD_GROUP = plugin?.__CARD_GROUP
+check(typeof SettingsCard === 'function', '设置卡片组件已暴露')
+check(Array.isArray(CARD_GROUP) && CARD_GROUP.length >= 3, `卡片把设置分了 ${CARD_GROUP?.length} 组`)
+
+if (typeof SettingsCard === 'function' && Array.isArray(CARD_GROUP)) {
+  const grouped = CARD_GROUP.flatMap(([, keys]) => keys)
+  check(new Set(grouped).size === grouped.length, '每个设置项只出现在一个分组里（不会重复渲染两个输入框）')
+  const mustHave = ['shell', 'cols', 'maxSessions', 'requireConsent', 'audit', 'captureOutput', 'extendedKeys']
+  const missing = mustHave.filter((k) => !grouped.includes(k))
+  check(missing.length === 0, `关键项都在卡片里（缺：${missing.join(',') || '无'}）`)
+
+  // 关键不变量：插槽是 keyed 的，key 必须**等于**宿主注册的 namespace，
+  // 不一致时 DSH 不会报错，只是**静默不渲染**（这就是"注册成功却看不到"的原因）。
+  const src = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  check(src.includes("name: 'settings.plugin.item'") && src.includes("key: 'dsh-agent-shell'"),
+    "卡片注册进 settings.plugin.item，且 key 等于 namespace 'dsh-agent-shell'")
+  check(src.includes("id: 'dsh-agent-shell'"), '同时提供 id（rc.6 的列表插槽用 id，rc.7 的 keyed 插槽用 key）')
+}
+
 /* ── 真实光标：单元格坐标 → 字符下标 → 屏幕位置 ───────────────────────────── */
 
 /* ── 行高必须实测：从 scrollHeight 推会在"文本少"时把光标画偏 ───────────────── */
@@ -449,10 +471,10 @@ const charCellWidth = plugin?.__charCellWidth
 const cellsToCharIndex = plugin?.__cellsToCharIndex
 const caretPlacement = plugin?.__caretPlacement
 const shouldShowCaret = plugin?.__shouldShowCaret
-const caretStyle = plugin?.__caretStyle
+const caretSplit = plugin?.__caretSplit
 check(typeof charCellWidth === 'function' && typeof cellsToCharIndex === 'function' &&
-  typeof caretPlacement === 'function' && typeof shouldShowCaret === 'function' && typeof caretStyle === 'function',
-  '光标定位的五个纯函数都已暴露')
+  typeof caretPlacement === 'function' && typeof shouldShowCaret === 'function' && typeof caretSplit === 'function',
+  '光标定位的纯函数都已暴露')
 
 if (typeof charCellWidth === 'function') {
   // 宽度表：这是"中文行里光标不偏"的全部依据
@@ -500,14 +522,26 @@ if (typeof charCellWidth === 'function') {
   check(shouldShowCaret({ locked: false, meta: null, placement }) === false, '无 meta → 不画')
   check(shouldShowCaret({ locked: false, meta: meta(), placement: null }) === false, '坐标算不出来 → 不画')
 
-  const style = caretStyle({ lineIndex: 22, cell: 4, charIndex: 2 }, 17.55, 7.8, 12, 10)
-  check(style !== null && style.top === 10 + 22 * 17.55, `纵向按行高定位：top=${style?.top}`)
-  check(style !== null && style.left === 12 + 4 * 7.8, `横向按单元格宽度定位（左侧内边距要算进去）：left=${style?.left}`)
-  check(style !== null && style.position === 'absolute' && style.pointerEvents === 'none',
-    '绝对定位在内容坐标里（随内容滚动）且不吃鼠标事件')
-  check(caretStyle({ lineIndex: 0, cell: 0, charIndex: 0 }, 17, 0, 12, 10) === null,
-    '量不到字符宽度就不画（宁可不画，也不画偏）')
+  // 位置不再靠像素算：切出「光标前 / 光标后」两段，交给浏览器排版
+  const split = caretSplit('abc', { offset: 1 })
+  check(split !== null && split.before === 'a' && split.after === 'bc', `切分正确：${JSON.stringify(split)}`)
+  check(split.before + split.after === 'abc', '两段拼回去必须等于原文（不能吞字符）')
+  check(caretSplit('abc', { offset: 99 }).offset === 3 && caretSplit('abc', { offset: -5 }).offset === 0,
+    '越界下标被夹到 [0, 长度]，不会切出半截')
+  check(caretSplit('anything', null) === null, '没有坐标 → 不切分（调用方据此不画）')
+
+  // 中文：这正是"用单元格算像素"会偏的场景；切分只关心字符边界，与字体无关
+  const cjk = '中文abc'
+  const cjkSplit = caretSplit(cjk, { offset: 2, cell: 4 })
+  check(cjkSplit.before === '中文' && cjkSplit.after === 'abc',
+    `中文场景切在字符边界：${JSON.stringify(cjkSplit)}`)
+  check(cjkSplit.before + cjkSplit.after === cjk, '中文场景也没有吞字符/多字符')
+
+  // 旧的像素算法已废弃（它假设 CJK 宽度恰好是 ASCII 的 2 倍，回退字体下必然偏）
+  check(plugin?.__caretStyle === undefined,
+    '像素定位函数已移除（不再用单元格宽度乘出位置）')
 }
+
 
 /* ── 「关闭 shell」必须两步（它与「收起」相邻但后果不可撤销）────────────────── */
 

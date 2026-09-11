@@ -136,9 +136,12 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
       }
 
   let settingsHooks = null
+  /** 装进来的 schema（update/describe 要复用它，才能像真实服务那样先解析默认值再校验）。 */
+  let schema0
   const settings = config.__withSettings === true
     ? {
         installSection (owner, ns, schema, entry, hooks) {
+          if (schema0 === undefined) schema0 = schema
           // 真实服务的 resolve() 会**先套上 schema 默认值**再调 validate，这里照做：
           // 否则 validate 收到的是缺字段的原始 entry，会误判成非法值。
           const resolved = typeof schema === 'function' ? schema(entry) : entry
@@ -148,6 +151,20 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
           hooks.setSource(() => settingsSource())
           hooks.onChange()
           return () => {}
+        },
+        // 真实服务还有 update/replace：走「解析 → 校验 → 持久化 → 通知」同一条路。
+        // 桩缺了它，插件的设置写入接口就只能返回 503 —— 那是桩不忠实，不是插件的问题。
+        async update (ns, patch) {
+          if (ns !== 'dsh-agent-shell') throw new Error(`未知 namespace：${ns}`)
+          const candidate = typeof schema0 === 'function' ? schema0({ ...settingsSource(), ...patch }) : { ...settingsSource(), ...patch }
+          if (typeof settingsHooks?.validate === 'function') settingsHooks.validate(candidate)
+          settingsSource = () => candidate
+          settingsChanges.push(patch)
+          settingsHooks?.onChange?.()
+        },
+        // describe()：设置页靠它列出 namespace（卡片注册用得上）
+        describe () {
+          return [{ ns: 'dsh-agent-shell', schema: schema0?.toJSON?.(), value: settingsSource(), base: config }]
         },
       }
     : undefined
