@@ -190,6 +190,54 @@ for (const rel of SCAN) {
 }
 notes.push('未发现泄漏的开发机路径或凭据')
 
+/* ---------- 6.2 客户端渲染引用的图标与样式类必须真实存在 ---------- */
+
+// 这两类错误的共同点：**语法检查过、测试也过，只有打开面板才看得出来** ——
+// 图标名写错 → 图标空白；类名写错 → 样式整块失效。
+// 实测就踩过一次：ⓘ 按钮用了 Icon({name:'info'})，而 ICON_PATHS 里当时没有 info。
+if (existsSync(clientPath)) {
+  const client = readFileSync(clientPath, 'utf8')
+
+  const iconsBlock = client.match(/const ICON_PATHS = \{([\s\S]*?)\n\}/)
+  if (iconsBlock === null) {
+    fail('lib/client.js 里找不到 ICON_PATHS')
+  } else {
+    const defined = new Set([...iconsBlock[1].matchAll(/^\s*([A-Za-z][\w]*)\s*:/gm)].map(m => m[1]))
+    const used = new Set([...client.matchAll(/name:\s*'([a-z][\w]*)'/g)].map(m => m[1])
+      .filter(n => !['button', 'text', 'none'].includes(n)))
+    const missing = [...used].filter(n => !defined.has(n))
+    // 只报「看起来是图标名」的用法：Icon({ name: 'x' })
+    const iconRefs = new Set([...client.matchAll(/Icon,\s*\{\s*name:\s*'([a-z][\w]*)'/g)].map(m => m[1]))
+    const missingIcons = [...iconRefs].filter(n => !defined.has(n))
+    if (missingIcons.length > 0) {
+      fail(`lib/client.js 引用了不存在的图标：${missingIcons.join(', ')}（已定义：${[...defined].join(', ')}）`)
+    } else {
+      notes.push(`图标引用全部存在（用到 ${iconRefs.size} 个：${[...iconRefs].join(', ')}）`)
+    }
+    void missing
+  }
+
+  const cssBlock = client.match(/const PANEL_CSS = `([\s\S]*?)`\n/)
+  if (cssBlock === null) {
+    fail('lib/client.js 里找不到 PANEL_CSS')
+  } else {
+    const cssClasses = new Set([...cssBlock[1].matchAll(/\.(dshsh-[\w-]+)/g)].map(m => m[1]))
+    const usedClasses = new Set(
+      [...client.matchAll(/className:\s*'([^']*)'/g)]
+        .flatMap(m => m[1].split(/\s+/))
+        .filter(c => c.startsWith('dshsh-') && !c.endsWith('-')),
+    )
+    // 以 '-' 结尾的是**动态拼接**的类前缀（例如 'dshsh-rs-' + dir），
+    // 把前缀当完整类名去比对只会误报，所以上面直接排除。
+    const missingClasses = [...usedClasses].filter(c => !cssClasses.has(c))
+    if (missingClasses.length > 0) {
+      fail(`lib/client.js 用了 PANEL_CSS 里不存在的类：${missingClasses.join(', ')}`)
+    } else {
+      notes.push(`className 引用的样式类全部存在（${usedClasses.size} 个）`)
+    }
+  }
+}
+
 /* ---------- 6.5 安全告警不许被悄悄删掉 ---------- */
 
 // 这不是格式检查，而是一条**产品承诺**：README 顶部必须持续告诉使用者

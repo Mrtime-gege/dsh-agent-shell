@@ -67,7 +67,12 @@ vm.createContext(context)
 vm.runInContext(readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8'), context, { filename: 'client.js' })
 
 const problems = []
-const check = (ok, label) => { console.log(`${ok ? '✓' : '✗'} ${label}`); if (!ok) problems.push(label) }
+let checks = 0
+const check = (ok, label) => {
+  checks += 1
+  console.log(`${ok ? '✓' : '✗'} ${label}`)
+  if (!ok) problems.push(label)
+}
 
 check(loaded.length === 1, `客户端通过 __ModuleLoader__ 注册了自己（${loaded.length} 次）`)
 const plugin = loaded[0]?.factory?.(context.require)
@@ -230,7 +235,89 @@ for (const [label, events] of orders) {
   check(commits.length === 0, '空的 compositionend 不会发送空串')
 }
 
+/* ── ⓘ 详情层的内容组装（buildInfoRows）──────────────────────────────────────── */
+
+const infoRows = plugin?.__infoRows
+check(typeof infoRows === 'function', '详情层组装函数 __infoRows 已暴露（纯函数，可离线验证）')
+
+if (typeof infoRows === 'function') {
+  const rich = infoRows({
+    server: {
+      socket: 'dsh-agent', maxSessions: 8, defaultCwd: '/home/u', shell: 'bash',
+      defaultTerminal: 'tmux-256color', historyLimit: 100000, extendedKeys: true,
+      guardDangerousCommands: true, watchdogEnabled: true, watchdogPid: '12345', watchedPid: '999',
+      adoptedWatchdog: false, keptAtBoot: ['dsh-a', 'dsh-b'],
+      approval: { integrated: false, seam: 'mounted', policy: 'never', policySource: 'session-override',
+        deploymentPolicy: 'ask', permissionMode: 'workspace-work', warning: 'W' },
+    },
+    meta: { name: 'dsh-build', cols: 120, rows: 32, foreground: 'make', attached: false, historySize: 178, historyLimit: 100000, historyBytes: 40960 },
+    sessions: [{ name: 'dsh-build' }], historyWindow: 200, maxWindow: 5000,
+    pkgVersion: '0.1.1', build: 'c14', locked: true,
+  })
+  const flat = rich.flatMap((g) => g.rows.map((r) => ({ g: g.group, k: r.k, v: r.v, tone: r.tone })))
+  const has = (group, key) => flat.some((r) => r.g === group && r.k === key)
+  check(rich.length >= 6, `分组数 = ${rich.length}（会话/缓冲/服务端/看门狗/审批/版本/键位）`)
+  for (const [group, key, expectSub] of [
+    ['当前会话', '名称', 'dsh-build'],
+    ['当前会话', '尺寸', '120 × 32'],
+    ['当前会话', '前台进程', 'make'],
+    ['当前会话', '输入', '已锁定'],
+    ['缓冲与取景', '已用行数', '178 / 100000'],
+    ['缓冲与取景', '已用字节', '40'],
+    ['服务端', 'socket', '-L dsh-agent'],
+    ['服务端', '会话数', '1 / 8'],
+    ['服务端', 'extended-keys', '开'],
+    ['服务端', '危险命令护栏', '开'],
+    ['孤儿看门狗', '看门狗', 'pid 12345'],
+    ['孤儿看门狗', '启动时保住', 'dsh-a, dsh-b'],
+    ['审批与安全', '官方审批', '未接入'],
+    ['审批与安全', '会话策略', 'never'],
+    ['版本', '插件版本', '0.1.1'],
+    ['版本', '客户端构建', 'c14'],
+  ]) {
+    const row = flat.find((r) => r.g === group && r.k === key)
+    check(row !== undefined && row.v.includes(expectSub), `详情行 ${group} / ${key} = ${row ? row.v : '(缺失)'}`)
+  }
+  check(flat.some((r) => r.g === '审批与安全' && r.tone === 'warn'), '审批未接入被标成告警色')
+  check(flat.filter((r) => r.g === '键位表').length >= 8, `键位表条目数 = ${flat.filter((r) => r.g === '键位表').length}`)
+  check(has('版本', '来源') && flat.find((r) => r.k === '来源').v.includes('AI 开发'), '详情层写明「由 AI 开发」')
+
+  // 最要紧的一组：字段全缺 / 半缺时不许抛错，也不许出现 undefined
+  const shapes = [
+    ['全空', {}],
+    ['只有 server', { server: {} }],
+    ['只有 meta', { meta: {} }],
+    ['server 为 null', { server: null, meta: null }],
+    ['类型不对', { server: 'x', meta: 42, sessions: 'y', historyWindow: 'z' }],
+    ['approval 残缺', { server: { approval: {} }, meta: {} }],
+    ['sessions 未给', { server: { socket: 's' } }],
+  ]
+  let threw = ''
+  let leaked = ''
+  for (const [label, input] of shapes) {
+    try {
+      const rows = infoRows({ pkgVersion: '1', build: 'b', ...input })
+        .flatMap((g) => g.rows.map((r) => `${r.k}=${r.v}`))
+      const bad = rows.filter((r) => /undefined|null|NaN/.test(r))
+      if (bad.length > 0) leaked += `${label}: ${bad.join(', ')}; `
+    } catch (error) {
+      threw += `${label}: ${String(error && error.message ? error.message : error)}; `
+    }
+  }
+  check(threw === '', `字段残缺时不抛错${threw === '' ? '' : ' —— ' + threw}`)
+  check(leaked === '', `字段残缺时不泄漏 undefined/NaN${leaked === '' ? '' : ' —— ' + leaked}`)
+
+  // 诚实性：字段没上报时必须写「未知」，不能把「宿主没上报」渲染成「已关闭」
+  const bare = infoRows({ server: {}, meta: {}, sessions: [], pkgVersion: '1', build: 'b', locked: true })
+    .flatMap((g) => g.rows.map((r) => `${r.k}=${r.v}`))
+  const extRow = bare.find((r) => r.startsWith('extended-keys='))
+  const guardRow = bare.find((r) => r.startsWith('危险命令护栏='))
+  check(extRow !== undefined && extRow.includes('未知'), `未上报时 extended-keys 显示未知：${extRow}`)
+  check(guardRow !== undefined && guardRow.includes('未知'), `未上报时护栏状态显示未知：${guardRow}`)
+}
+
+const total = checks + keyCases.length + orders.length
 console.log(problems.length === 0
-  ? `\n客户端纯函数测试：全部通过（${keyCases.length + orders.length + 9} 项断言）`
+  ? `\n客户端纯函数测试：全部通过（${total} 项断言）`
   : `\n客户端纯函数测试：${problems.length} 项失败\n  - ${problems.join('\n  - ')}`)
 process.exit(problems.length === 0 ? 0 : 1)
