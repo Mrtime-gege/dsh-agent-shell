@@ -596,9 +596,12 @@ if (typeof ShellPanel === 'function') {
     fake.reset()
     try { panel() } catch { /* 渲染错误已在上面断言过 */ }
 
-    // 只跑滚动 effect：按源码特征挑出来，避免触发 /list、/screen 的真实轮询。
+    // 只跑「纯状态」effect：按源码特征挑出来，避免触发 /list、/screen 的真实轮询。
     const scrollEffects = fake.effects().filter((fn) => String(fn).includes('scrollAnchor'))
     check(scrollEffects.length === 1, `找到 ${scrollEffects.length} 个滚动 effect（应为 1）`)
+
+    const viewKeyEffects = fake.effects().filter((fn) => String(fn).includes('viewKeyRef'))
+    check(viewKeyEffects.length === 1, `找到 ${viewKeyEffects.length} 个视图切换 effect（应为 1，负责切会话后回到跟随）`)
 
     if (scrollEffects.length === 1) {
       // 把「初始化值为 null」的 ref 换成一个假 DOM 元素（screenRef 就是这一类）
@@ -619,6 +622,16 @@ if (typeof ShellPanel === 'function') {
       // 初始 pinned=true 且假元素不在底部 → 应当跟随到底（scrollHeight 1000 - clientHeight 400）
       check(fakeEl.scrollTop === 600, `滚动 effect 生效：贴底时滚到底部（scrollTop=${fakeEl.scrollTop}，期望 600）`)
       check(disposer === undefined || typeof disposer === 'function', '滚动 effect 的返回值是一个合法清理函数或 undefined')
+
+      for (const fn of viewKeyEffects) {
+        let viewKeyError = ''
+        try { fn() } catch (error) { viewKeyError = String(error && error.message ? error.message : error) }
+        check(viewKeyError === '', `视图切换 effect 能真正执行${viewKeyError === '' ? '' : ' —— ' + viewKeyError}`)
+        // 再跑一次：key 未变时应直接返回，不会无限 setState
+        let repeatError = ''
+        try { fn() } catch (error) { repeatError = String(error && error.message ? error.message : error) }
+        check(repeatError === '', '视图切换 effect 重复执行不会出错（key 未变时直接返回）')
+      }
     }
   }
 }
