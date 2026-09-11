@@ -482,6 +482,14 @@ if (typeof charCellWidth === 'function') {
   check(caretPlacement({ screen, meta: meta({ paneHeight: 0 }) }) === null, 'paneHeight 缺失就不画')
   check(caretPlacement({ screen: '', meta: meta() }) === null, '空屏幕不画')
 
+  // 全新窗格（文本最少）：文本行数**刚好等于**窗格高度，光标在第 1 行。
+  // 这是最容易出错、也最常被看到的一种：分母刚刚好，任何"少算几行"都会算成负号。
+  const fresh = Array.from({ length: 24 }, () => '').join('\n')
+  const freshCaret = caretPlacement({ screen: fresh, meta: meta({ cursorY: 1, cursorX: 4 }) })
+  check(freshCaret !== null && freshCaret.lineIndex === 1,
+    `全新窗格也能算出光标行号（24 行 / paneHeight 24 / cursorY 1 → ${freshCaret?.lineIndex}）`)
+  check(freshCaret !== null && freshCaret.charIndex === 0, '空行上的光标落在行首')
+
   // 「只在解锁后显示」是用户明确要求的行为，钉死
   const placement = bottom
   check(shouldShowCaret({ locked: false, meta: meta(), placement }) === true, '解锁 + 光标可见 + 坐标可算 → 画')

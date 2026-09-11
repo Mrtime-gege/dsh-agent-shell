@@ -579,7 +579,39 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   hCwd.cleanup()
 }
 
-/* ── 7.94 shell_consent：让模型能查"我得到授权了吗"，但不许频繁查 ───────────── */
+/* ── 7.935 面板的 /screen 必须给出**完整窗格**，否则光标几何算不出来 ─────────── */
+
+{
+  // 回归的是这个真实故障：`screen()` 默认会裁掉结尾空行，于是"文本少"的会话返回的行数
+  // 少于窗格高度，`行号 = 总行数 − paneHeight + cursorY` 算成负数 → 光标**不显示**。
+  const hCaret = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-caret`,
+    config: { watchdog: false, __consentMode: 'ok' },
+  })
+  await hCaret.run('shell_open', { name: 'caret' })
+  await new Promise((r) => setTimeout(r, 500))
+
+  const fresh = await hCaret.call('/screen?name=dsh-caret&lines=200', 'GET')
+  check(fresh.code === 200, `读屏幕 → HTTP ${fresh.code}`)
+  const lines = String(fresh.body.screen ?? '').split('\n')
+  const pane = Number(fresh.body.meta?.paneHeight ?? 0)
+  const cursorY = Number(fresh.body.meta?.cursorY ?? 0)
+  check(pane > 0, `meta 带上了窗格高度与光标（paneHeight=${pane} cursorY=${cursorY} cursorVisible=${fresh.body.meta?.cursorVisible}）`)
+  check(lines.length >= pane,
+    `文本少时也返回**完整窗格**（行数 ${lines.length} ≥ paneHeight ${pane}）`)
+  const lineIndex = lines.length - pane + cursorY
+  check(lineIndex >= 0 && lineIndex < lines.length,
+    `光标行号可换算（${lineIndex}）—— 修复前这里是 ${2 - pane + cursorY}，负数 → 不画光标`)
+
+  // 工具路径相反：它要的是干净文本，不该拖一堆空行给模型看
+  const read = String(await hCaret.run('shell_read', { session: 'dsh-caret' }))
+  check(!/\n\s*\n\s*$/.test(read), 'shell_read 仍然裁掉结尾空行（工具输出保持干净）')
+
+  await hCaret.run('shell_close', { session: 'dsh-caret' })
+  hCaret.cleanup()
+}
+
+/* ── 7.94 shell_consent/* ── 7.94 shell_consent：让模型能查"我得到授权了吗"，但不许频繁查 ───────────── */
 
 {
   const hConsent2 = await makeHarness({
