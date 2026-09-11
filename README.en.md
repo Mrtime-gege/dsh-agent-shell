@@ -117,7 +117,7 @@ Same-origin, `127.0.0.1`, **unauthenticated**: `GET /plugins/shell/{list, screen
 
 | File | Contents |
 |---|---|
-| [README.md](./README.md) | 中文首页（本文档的中文主版） |
+| [README.md](./README.md) | 中文首页（本文档的中文主版）；含 `更新与修复记录`（每次修了什么、根因、怎么验证） |
 | [docs/使用细节.md](./docs/使用细节.md) | 配置项全表、面板/输入法细节、工具与 HTTP 参数（中文） |
 | [docs/设计与实现.md](./docs/设计与实现.md) | 解耦设计、生命周期与孤儿治理、踩坑注记、测试与发布（中文） |
 | [SECURITY.md](./SECURITY.md) | full security model: why there is no approval, unauthenticated HTTP, guard boundaries |
