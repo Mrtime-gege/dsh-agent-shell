@@ -410,6 +410,64 @@ if (typeof auditRowValue === 'function') {
   check(tmuxRowValue({}).includes('未知'), '体检未完成/旧宿主 → 未知')
 }
 
+/* ── 真实光标：单元格坐标 → 字符下标 → 屏幕位置 ───────────────────────────── */
+
+const charCellWidth = plugin?.__charCellWidth
+const cellsToCharIndex = plugin?.__cellsToCharIndex
+const caretPlacement = plugin?.__caretPlacement
+const shouldShowCaret = plugin?.__shouldShowCaret
+const caretStyle = plugin?.__caretStyle
+check(typeof charCellWidth === 'function' && typeof cellsToCharIndex === 'function' &&
+  typeof caretPlacement === 'function' && typeof shouldShowCaret === 'function' && typeof caretStyle === 'function',
+  '光标定位的五个纯函数都已暴露')
+
+if (typeof charCellWidth === 'function') {
+  // 宽度表：这是"中文行里光标不偏"的全部依据
+  check(charCellWidth('a') === 1 && charCellWidth(' ') === 1, 'ASCII 与空格占 1 格')
+  check(charCellWidth('中') === 2 && charCellWidth('文') === 2, '汉字占 2 格')
+  check(charCellWidth('，') === 2 && charCellWidth('（') === 2, '全角标点占 2 格')
+  check(charCellWidth('Ａ') === 2, '全角字母（FF00–FF60）占 2 格')
+  check(charCellWidth('ｱ') === 1, '半角片假名（FF61–FF9F）占 1 格 —— 这两段不能一起处理，否则日文行会偏')
+  check(charCellWidth('\u0301') === 0 && charCellWidth('\ufe0f') === 0, '组合符/变体选择符占 0 格（否则中文重音会错位）')
+  check(charCellWidth('🙂') === 2, 'emoji 占 2 格')
+
+  const wide = '中文abc'
+  check(cellsToCharIndex(wide, 0) === 0, '列 0 → 行首')
+  check(cellsToCharIndex(wide, 1) === 0, '列 1 落在「中」的第二格 → 仍指向「中」')
+  check(cellsToCharIndex(wide, 2) === 1, '列 2 → 「文」')
+  check(cellsToCharIndex(wide, 4) === 2, '列 4 → 「a」（前两个汉字吃掉 4 格）')
+  check(cellsToCharIndex('abc   ', 6) === 6, '光标停在行尾空白后 → 行尾（就画在末尾）')
+  check(cellsToCharIndex('abc', 99) === 3, '列超出整行 → 行尾，不会越界')
+
+  // 贴底映射：cursor_y 是相对可见窗格的，我们的文本是「历史 + 可见窗格」
+  const screen = Array.from({ length: 40 }, (_, i) => 'line-' + i).join('\n')
+  const meta = (over = {}) => ({ paneHeight: 24, cursorX: 0, cursorY: 0, cursorVisible: true, ...over })
+  const bottom = caretPlacement({ screen, meta: meta({ cursorY: 6 }) })
+  check(bottom !== null && bottom.lineIndex === 22, `可见窗格第 6 行 → 文本第 22 行（40−24+6）：${bottom?.lineIndex}`)
+  check(caretPlacement({ screen, meta: meta({ cursorY: 23 }) }).lineIndex === 39, '最后一行的光标映射到文本末行')
+  check(caretPlacement({ screen, meta: null }) === null, '没有 meta 就不画（不猜坐标）')
+  check(caretPlacement({ screen, meta: meta({ paneHeight: 0 }) }) === null, 'paneHeight 缺失就不画')
+  check(caretPlacement({ screen: '', meta: meta() }) === null, '空屏幕不画')
+
+  // 「只在解锁后显示」是用户明确要求的行为，钉死
+  const placement = bottom
+  check(shouldShowCaret({ locked: false, meta: meta(), placement }) === true, '解锁 + 光标可见 + 坐标可算 → 画')
+  check(shouldShowCaret({ locked: true, meta: meta(), placement }) === false,
+    '**锁定时不画**（AI 输入/未解锁时那个位置不代表用户下一个字符的落点）')
+  check(shouldShowCaret({ locked: false, meta: meta({ cursorVisible: false }), placement }) === false,
+    '程序自己隐藏了光标（TUI）→ 不画（不画终端不会画的东西）')
+  check(shouldShowCaret({ locked: false, meta: null, placement }) === false, '无 meta → 不画')
+  check(shouldShowCaret({ locked: false, meta: meta(), placement: null }) === false, '坐标算不出来 → 不画')
+
+  const style = caretStyle({ lineIndex: 22, cell: 4, charIndex: 2 }, 17.55, 7.8, 12, 10)
+  check(style !== null && style.top === 10 + 22 * 17.55, `纵向按行高定位：top=${style?.top}`)
+  check(style !== null && style.left === 12 + 4 * 7.8, `横向按单元格宽度定位（左侧内边距要算进去）：left=${style?.left}`)
+  check(style !== null && style.position === 'absolute' && style.pointerEvents === 'none',
+    '绝对定位在内容坐标里（随内容滚动）且不吃鼠标事件')
+  check(caretStyle({ lineIndex: 0, cell: 0, charIndex: 0 }, 17, 0, 12, 10) === null,
+    '量不到字符宽度就不画（宁可不画，也不画偏）')
+}
+
 /* ── 「关闭 shell」必须两步（它与「收起」相邻但后果不可撤销）────────────────── */
 
 const closeActionFor = plugin?.__closeActionFor
