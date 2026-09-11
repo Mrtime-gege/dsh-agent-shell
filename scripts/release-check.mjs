@@ -336,6 +336,15 @@ if (existsSync(clientPath)) {
   }
   void unknown
 
+  // 字体同样不许硬编码：DSH 只提供 --ds-font-family-code（代码用），
+  // chrome 一律继承应用字体 —— 自己写字体栈就会和界面其它部分不一致。
+  const fontStacks = [...new Set([...client.matchAll(/ui-monospace|SFMono-Regular|Menlo,\s*monospace|Consolas/g)].map(m => m[0]))]
+  if (fontStacks.length > 0) {{
+    fail(`lib/client.js 里出现硬编码字体栈：${fontStacks.join(', ')}}（代码字体请用 var(--ds-font-family-code)，chrome 请继承）`)
+  }} else {{
+    notes.push('没有硬编码字体栈（代码字体走 --ds-font-family-code，chrome 继承应用字体）')
+  }}
+
   // 硬编码颜色：颜色一旦写死，就不会跟随主题。确实需要（例如遮罩）就把字面量加进白名单并写明理由。
   const ALLOWED_COLOR_LITERALS = []
   const literals = [...new Set([...client.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)].map(m => m[0]))]
