@@ -6,7 +6,7 @@
 
 ### 持久化终端
 
-- 基于私有 tmux socket（默认 `-L dsh-agent`）提供**跨对话存活**的持久 shell：会话由宿主进程持有，不属于任何一次对话，新开对话、热重载、重启 `dsh web`（带 watchdog 收养）都不会丢。
+- 基于私有 tmux socket（默认 `-L dsh-agent`）提供**跨对话存活**的持久 shell：会话由宿主进程持有，不属于任何一次对话，新开对话、切会话与**同进程热重载**都不会丢。（**重启 `dsh web` 会结束全部 shell**，详见 README 的生命周期一节。）
 - 服务端配置通过 `-f` 在**启动时**写入：`history-limit`、`default-terminal`、关闭 status / mouse、`escape-time`，避免事后 `set-option` 无法生效的坑。
 
 ### 9 个模型工具
@@ -28,7 +28,7 @@
 
 - 危险命令护栏（默认开启）：作为**启发式减速带**拦截 `rm -rf /`、`mkfs`、`dd of=/dev/*`、`--no-preserve-root` 等模式；已在 README 中明确说明它**不是沙箱**。
 - 低权限模式支持：在 `workspace-write` 等受限模式下会出现明确报错，建议以 `danger-full-access` 运行（README 有说明）。
-- 孤儿 tmux 治理：tmux server 会 setsid 脱离宿主，因此额外拉起 detached watchdog 轮询宿主 pid，宿主消失即 `kill-server`；watchdog 支持被新宿主**收养**，热重载不会杀掉用户正在用的 shell。
+- 孤儿 tmux 治理：tmux server 会 setsid 脱离宿主，因此额外拉起 detached watchdog 轮询宿主 pid，宿主消失即 `kill-server`；watchdog 支持被新宿主**收养**，同进程热重载不会杀掉用户正在用的 shell。
 
 ### 解耦说明
 
