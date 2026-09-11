@@ -364,6 +364,87 @@ if (typeof pillModel === 'function') {
   check(junk.total === 1 && junk.label === 'ok', '垃圾会话条目被过滤，不会渲染出 undefined')
 }
 
+/* ── 滚动锚定（scrollAnchor / contentShift）────────────────────────────────────── *
+ *
+ * 回归的是这个真实 bug：窗口取的是「最后 N 行」，新输出会把最上面的行挤掉，
+ * 于是即使 scrollTop 一点都不动，正在读的那几行也会被顶上去。
+ * 期望行为：贴底 → 跟随；否则 → 按内容位移补偿，阅读位置不动。
+ */
+
+// 样式的内边距与滚动补偿用的常量必须同源
+const padStyleOk = /padding:\s*\(SCREEN_PAD_Y \/ 2\)/.test(readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8'))
+check(padStyleOk, '屏幕区内边距由 SCREEN_PAD_Y 推导（样式与滚动补偿不会各自写死）')
+
+const scrollAnchor = plugin?.__scrollAnchor
+const contentShift = plugin?.__contentShift
+check(typeof scrollAnchor === 'function' && typeof contentShift === 'function', '滚动锚定 scrollAnchor / contentShift 已暴露')
+
+if (typeof scrollAnchor === 'function' && typeof contentShift === 'function') {
+  const lines = (from, count) => Array.from({ length: count }, (_, i) => `line-${from + i}`).join('\n')
+
+  // contentShift：只关心「整体位移了几行」的正负号与数值
+  const shiftCases = [
+    ['纯追加（未裁剪）：内容没有位移', lines(0, 100), lines(0, 105), 0],
+    ['顶部被挤掉 5 行：内容整体上移', lines(0, 100), lines(5, 100), -5],
+    ['窗口翻倍（前面插入 120 行）：内容整体下移', lines(0, 100), lines(-120, 220), 120],
+    ['大量裁剪（挤掉 97 行）也能算出来', lines(0, 100), lines(97, 100), -97],
+    ['内容被整屏换掉：判不准就不补偿', lines(0, 40), lines(1000, 40), 0],
+    ['首行相同但其余全不同：不能被巧合骗到', 'L1\nL2\nL3\nL4', 'L1\nX\nY\nZ', 0],
+    ['退化内容（整屏重复行）宁可不动', 'L1\nL1\nL1\nL1', 'L1\nX', 0],
+    ['无输出：不补偿', '', lines(0, 10), 0],
+  ]
+  for (const [label, prev, next, want] of shiftCases) {
+    const got = contentShift(prev.split('\n'), next.split('\n'))
+    check(got === want, `contentShift ${label} → ${got}（期望 ${want}）`)
+  }
+
+  // scrollAnchor：像素层面。行高 20px、可视 400px（20 行）
+  const VIEW = { clientHeight: 400, padding: 20, pinned: false }   // 20px 上下内边距之和，与 SCREEN_PAD_Y 一致
+  const view = (prev, next, scrollTop) => ({
+    scrollTop,
+    clientHeight: VIEW.clientHeight,
+    scrollHeight: (next.split('\n').length) * 20 + VIEW.padding,
+    padding: VIEW.padding,
+    pinned: VIEW.pinned,
+  })
+
+  const append = lines(0, 100) + '\n' + lines(0, 105).split('\n').slice(100).join('\n')
+  const plan1 = scrollAnchor(lines(0, 100), append, view(lines(0, 100), append, 300))
+  check(plan1.scrollTop === 300 && plan1.pinned === false && plan1.reason === 'anchor', `纯追加不动阅读位置（scrollTop ${plan1.scrollTop}）`)
+
+  const scr = scrollAnchor(lines(0, 100), lines(5, 100), view(lines(0, 100), lines(5, 100), 300))
+  check(scr.scrollTop === 200, `被挤掉 5 行后 scrollTop 补偿到 200（实际 ${scr.scrollTop}）—— 这就是原来的 bug`)
+  check(scr.pinned === false, '补偿后依然处于「不跟随」状态')
+
+  const pre = scrollAnchor(lines(0, 100), lines(-120, 220), view(lines(0, 100), lines(-120, 220), 300))
+  check(pre.scrollTop === 300 + 120 * 20, `窗口翻倍后阅读位置跟着内容下移（${pre.scrollTop}）`)
+
+  const bottom = scrollAnchor(lines(0, 100), lines(5, 100), { ...view(lines(0, 100), lines(5, 100), 0), pinned: true })
+  check(bottom.pinned === true && bottom.reason === 'follow', '显式跟随（贴底）时保持跟随')
+  check(bottom.scrollTop === bottom.scrollTop && bottom.scrollTop > 0, '跟随状态下滚到底部')
+
+  const nearBottom = view(lines(0, 100), lines(5, 100), 0)
+  const near = scrollAnchor(lines(0, 100), lines(5, 100), {
+    ...nearBottom, scrollTop: nearBottom.scrollHeight - nearBottom.clientHeight - 6,
+  })
+  check(near.reason === 'follow' && near.pinned === true, '数值上已在底部容差内 → 跟随（不会因为差几像素就停止跟随）')
+
+  const replaced = scrollAnchor(lines(0, 40), lines(1000, 40), view(lines(0, 40), lines(1000, 40), 300))
+  check(replaced.scrollTop === 300 && replaced.shift === 0, '内容被换掉时保持像素位置不动（不瞎补偿）')
+
+  const clamped = scrollAnchor(lines(0, 100), lines(95, 100), view(lines(0, 100), lines(95, 100), 10))
+  check(clamped.scrollTop === 0, `补偿到顶部时被夹在 0（实际 ${clamped.scrollTop}）`)
+
+  // 内边距必须从行高里扣掉，否则每行偏一点，位移多了就漂
+  const padless = scrollAnchor(lines(0, 100), lines(5, 100), { scrollTop: 300, clientHeight: 400, scrollHeight: 2020, padding: 0, pinned: false })
+  const padded = scrollAnchor(lines(0, 100), lines(5, 100), { scrollTop: 300, clientHeight: 400, scrollHeight: 2020, padding: 20, pinned: false })
+  check(padded.scrollTop === 200, `带内边距时行高精确（${padded.scrollTop}，期望 200）`)
+  check(padless.scrollTop === 199, `不声明内边距时会偏一点（${padless.scrollTop}，期望 199 —— 说明这个参数真的在起作用）`)
+
+  const grown = scrollAnchor('', lines(0, 100), { scrollTop: 0, clientHeight: 400, scrollHeight: 2000, pinned: false })
+  check(Number.isFinite(grown.scrollTop) && grown.scrollTop >= 0, '从空输出到有输出不会算出 NaN')
+}
+
 /* ── 组件渲染 + 事件处理器遍历（抓「只在打开面板时才炸」的错误）──────────────── */
 
 const ShellPanel = plugin?.__ShellPanel
@@ -386,7 +467,8 @@ if (typeof ShellPanel === 'function') {
         return [cells[i], (next) => { cells[i] = typeof next === 'function' ? next(cells[i]) : next }]
       },
       useRef: (init) => { const i = cursor++; if (!(i in cells)) cells[i] = { current: init }; return cells[i] },
-      useEffect: () => { cursor++ },
+      // 记录回调而不执行：轮询类 effect 会发真实请求并留定时器，只能挑着跑（见下方仅跑滚动 effect）
+      useEffect: (fn) => { const i = cursor++; cells[i] = fn },
       useCallback: (fn) => fn,
       useMemo: (fn) => fn(),
       createContext: () => ({ Provider: 'P', Consumer: 'C' }),
@@ -395,6 +477,9 @@ if (typeof ShellPanel === 'function') {
     return {
       hooks,
       size: () => cells.length,
+      effects: () => cells.filter((c) => typeof c === 'function'),
+      refs: () => cells.filter((c) => c !== null && typeof c === 'object' && 'current' in c),
+      cells: () => cells,
       reset: () => { cursor = 0 },
       /**
        * 把某个 **state** 单元换成候选值（用来把「展开 / 详情」等内部状态打开）。
@@ -494,6 +579,8 @@ if (typeof ShellPanel === 'function') {
           key: 'x', code: 'KeyX', keyCode: 88, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
           target: { value: '' }, currentTarget: { value: '', select () {}, setPointerCapture () {}, releasePointerCapture () {} },
           relatedTarget: null, nativeEvent: {},
+          // 滚动几何：缺了它 onScroll 会算出 NaN >= NaN（false），把 pinned 误关掉 —— 测试自身的假象
+          clientHeight: 400, scrollHeight: 1000, scrollTop: 600,
           clientX: 0, clientY: 0, pointerId: 1,
         })
       } catch (error) {
@@ -501,6 +588,38 @@ if (typeof ShellPanel === 'function') {
       }
     }
     check(failures.length === 0, `所有处理器的同步部分都能跑${failures.length === 0 ? '' : ' —— ' + failures.slice(0, 4).join(' | ')}`)
+
+    // 再渲染一次，重新登记 effect 回调（上一轮 patch 把 effect 单元换成了候选值）。
+    // 先把布尔 state 复位成 true：处理器遍历会调用 setState，状态可能已被改过。
+    const allCells = fake.cells()
+    for (let i = 0; i < allCells.length; i += 1) if (typeof allCells[i] === 'boolean') allCells[i] = true
+    fake.reset()
+    try { panel() } catch { /* 渲染错误已在上面断言过 */ }
+
+    // 只跑滚动 effect：按源码特征挑出来，避免触发 /list、/screen 的真实轮询。
+    const scrollEffects = fake.effects().filter((fn) => String(fn).includes('scrollAnchor'))
+    check(scrollEffects.length === 1, `找到 ${scrollEffects.length} 个滚动 effect（应为 1）`)
+
+    if (scrollEffects.length === 1) {
+      // 把「初始化值为 null」的 ref 换成一个假 DOM 元素（screenRef 就是这一类）
+      const fakeEl = {
+        scrollTop: 100, scrollHeight: 1000, clientHeight: 400,
+        focus () {}, blur () {}, select () {}, addEventListener () {}, removeEventListener () {},
+        setPointerCapture () {}, releasePointerCapture () {}, scrollTo () {},
+        getBoundingClientRect () { return { left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 } },
+      }
+      let patched = 0
+      for (const ref of fake.refs()) if (ref.current === null) { ref.current = fakeEl; patched += 1 }
+      check(patched > 0, `为 ${patched} 个空 ref 注入了假元素`)
+
+      let effectError = ''
+      let disposer = null
+      try { disposer = scrollEffects[0]() } catch (error) { effectError = String(error && error.message ? error.message : error) }
+      check(effectError === '', `滚动 effect 能真正执行${effectError === '' ? '' : ' —— ' + effectError}`)
+      // 初始 pinned=true 且假元素不在底部 → 应当跟随到底（scrollHeight 1000 - clientHeight 400）
+      check(fakeEl.scrollTop === 600, `滚动 effect 生效：贴底时滚到底部（scrollTop=${fakeEl.scrollTop}，期望 600）`)
+      check(disposer === undefined || typeof disposer === 'function', '滚动 effect 的返回值是一个合法清理函数或 undefined')
+    }
   }
 }
 
