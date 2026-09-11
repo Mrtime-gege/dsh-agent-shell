@@ -31,7 +31,8 @@
     "CONTRIBUTING.md",
     "SECURITY.md",
     "PUBLISHING.md",
-    "LICENSE"
+    "LICENSE",
+    "docs"
   ],
   "engines": {
     "node": ">=20"

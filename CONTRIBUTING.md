@@ -31,6 +31,8 @@ lib/index.js           宿主半：9 个模型工具、8 个 HTTP 路由、生�
 lib/tmux.js            驱动层：tmux 调用、服务端配置、看门狗布防/收养
 lib/client.js          浏览器半：classic script，悬浮面板（插槽 shell.overlay）
 cordis.patch.yml       bundle 补丁：往宿主 composition 里插入插件行
+docs/使用细节.md       配置项全表、面板/输入法细节、工具与 HTTP 参数
+docs/设计与实现.md     解耦设计、生命周期与孤儿治理、踩坑注记、测试与发布策略
 README.md / README.en.md   中文 / 英文说明
 CHANGELOG.md           版本记录（发布时按版本段落抽取 Release 说明）
 PUBLISHING.md          发布指南：一次性准备、版本策略、两条发布路线、排错
@@ -71,14 +73,14 @@ scripts/dev-sync.sh
 * **不要 `JSON.stringify` 宿主活对象**（Service、Session、Cordis 对象）。只读需要的叶子字段，
   自己拼一个最小的普通对象。
 * **改行为就改文档。** 新增或改名配置项、工具、HTTP 路由时，同一次提交里更新
-  `README.md` 的对应表格与 `cordis.patch.yml` 里的配置样例。
+  `README.md` 首页与 `docs/使用细节.md` 的对应表格，以及 `cordis.patch.yml` 里的配置样例。
 
 ## 提交前必须跑
 
 ```sh
 npm run check          # node --check 三个源文件（语法）
 npm run release:check  # 发布不变量：版本/CHANGELOG、files 白名单、入口可达、客户端形态、凭据泄漏
-npm run smoke          # 打包产物冒烟测试（需要宿主 peer 与 tmux，见 README 对应小节）
+npm run smoke          # 打包产物冒烟测试（需要宿主 peer 与 tmux，见 docs/设计与实现.md）
 ```
 
 前两条都必须通过。`release:check` 故意做得很啰嗦，它拦住的问题（客户端半被写成 ESM、

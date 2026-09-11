@@ -78,7 +78,9 @@ const REQUIRED = [
   'cordis.patch.yml',
   'lib/index.js',
   'lib/tmux.js',
-  'lib/client.js'
+  'lib/client.js',
+  'docs/使用细节.md',
+  'docs/设计与实现.md'
 ]
 
 for (const rel of REQUIRED) {
@@ -89,7 +91,7 @@ const files = Array.isArray(pkg.files) ? pkg.files : []
 if (files.length === 0) {
   fail('package.json 没有 files 白名单：会把开发文件一起发出去')
 }
-for (const entry of ['lib', 'cordis.patch.yml', 'README.md', 'README.en.md', 'CHANGELOG.md', 'LICENSE']) {
+for (const entry of ['lib', 'docs', 'cordis.patch.yml', 'README.md', 'README.en.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'PUBLISHING.md', 'LICENSE']) {
   if (!files.includes(entry)) fail(`files 白名单缺少 ${entry}`)
 }
 // 运行期入口不许漏在自己的白名单之外

@@ -1,180 +1,128 @@
 # dsh-agent-shell
 
-> Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness —
-> 9 model tools plus a draggable floating panel you can actually type into.
+> Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness — 9 model tools plus a draggable floating panel you can actually type into.
 
 [![npm version](https://img.shields.io/npm/v/dsh-agent-shell.svg)](https://www.npmjs.com/package/dsh-agent-shell)
 [![npm license](https://img.shields.io/npm/l/dsh-agent-shell.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
-[![tmux](https://img.shields.io/badge/tmux-3.x-blue.svg)](https://github.com/tmux/tmux)
 [![CI](https://github.com/Mrtime-gege/dsh-agent-shell/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrtime-gege/dsh-agent-shell/actions/workflows/ci.yml)
 
 [中文（主文档）](./README.md) · **English**
 
-> **This plugin was developed by AI.** Design and implementation were done by an AI, with
-> extensive automated testing (~200 assertions) and real-machine verification — but **no human
-> security audit**. Factor that into your risk assessment.
+> **This plugin was developed by AI.** Design, implementation and tests were all done by an AI
+> (157 automated assertions plus real-machine verification, which found and fixed six real bugs) —
+> but **no human security audit**. Factor that into your risk assessment.
 
 ## ⚠️ Read this first: it is a real shell, with no approval gate
 
-**This is not a sandbox and not a restricted tool. Installing it hands a real machine's terminal
-to an AI.**
+**This is not a sandbox and not a restricted tool. Installing it hands a real machine's terminal to an AI.**
 
 * **The model can run arbitrary commands.** The `shell_*` tools drive a real `bash` inside a real
-  tmux session, **with your own user privileges**. It can read your files, rewrite your config,
-  make network calls, install things, delete things — nothing stops it.
+  tmux session, **with your own user privileges** — read files, rewrite config, make network calls,
+  install things, delete things; nothing stops it.
 * **There is no approval prompt.** DSH ships an approval seam (`dsh-user-approval`), but in
-  `danger-full-access` — **the only mode this plugin can work in** — the platform sets its policy
-  to `never` (deterministic reject, no UI). This plugin does **not** integrate that seam, so a
-  command the model runs is never offered to you for allow/reject.
+  `danger-full-access` — **the only mode this plugin can work in** — the platform sets its policy to
+  `never` (deterministic reject, no UI). This plugin does **not** integrate that seam, so a command
+  the model runs is never offered to you for allow/reject. See [SECURITY.md](./SECURITY.md).
 * **The only defence is a heuristic guard** (`guardDangerousCommands`, on by default): ten regexes
-  matching `rm -rf /`, `mkfs`, `dd of=/dev/*`, `sudo` and friends. It is **trivially bypassed**
-  through concatenation, variables or script files, and it **false-positives** on innocent text.
-  It is a speed bump, **not a protection**.
-* **The HTTP endpoints are unauthenticated** (see [Security](#security)).
-* The `审批 never` tag on the panel is **a truthful notice, not a switch**: it means official
-  approval is off and nobody will be asked about the model's commands.
+  matching `rm -rf /`, `mkfs`, `dd of=/dev/*`, `sudo` and friends. **Trivially bypassed** through
+  concatenation, variables or script files; it also **false-positives** on innocent text. It is a
+  speed bump, **not a protection**.
+* **The HTTP endpoints are unauthenticated**, and the panel talks over exactly that channel.
+* The `无审批` tag on the panel is **a truthful notice, not a switch**.
 
-Use it on your own dev box and accept that the model may run anything there; do **not** use it on
+Use it on your own dev box and accept that the model may run anything there. Do **not** use it on
 machines holding irreplaceable data, in production, or anywhere prompt injection is plausible —
 or run it inside a container/VM to bound the blast radius.
 
 ## What it is
 
-A DSH plugin that owns a **private tmux server** (`-L dsh-agent`) with several named sessions on
-top of it. The host half registers `shell_*` tools for the model and exposes same-origin HTTP;
-the client half mounts a floating panel into the `shell.overlay` slot.
+A private tmux server (`-L dsh-agent`) holds several named sessions; the host half registers `shell_*`
+tools and exposes same-origin HTTP; the client half mounts a floating panel into the `shell.overlay`
+slot. The three are decoupled, so **shells do not belong to any conversation** — new chats, session
+switches, hot reloads and quick restarts keep them alive, and the panel and the model drive the same
+shells.
 
-The point is **decoupling**: your shells do not belong to a conversation. Start a long build,
-close the chat, open a new one — the shell is still there, and the agent in *any* conversation
-drives the same shells you see in the panel.
-
-| Axis | Coupled design | This plugin |
-|---|---|---|
-| Lifetime | dynamic plugin inside one session | a **profile bundle on the Host plane**; tmux lives as long as the harness process |
-| UI scope | session-scoped slot | **`shell.overlay`** (`scope: root`) — visible with or without a conversation |
-| Data channel | `harness.handle` / `host.call` bound to one plugin run | **same-origin HTTP** via the host web server |
-
-Unlike the built-in line-oriented command tool, which runs each call in a fresh non-interactive
-process, this plugin keeps a real interactive TTY — so `sudo` password prompts, `ssh`, `vim`,
-`python` REPLs and `Ctrl-C` all behave the way they do in a terminal you are sitting at.
+Unlike the built-in line-oriented command tool (each call runs in a fresh non-interactive process),
+this plugin keeps a real interactive TTY — so `sudo` password prompts, `ssh`, `vim`, `python` REPLs
+and `Ctrl-C` behave the way they do in a terminal you are sitting at.
 
 ## Requirements
 
-| Item | Version |
+| Item | Version / note |
 |---|---|
 | DSH | `0.1.2-rc.1` line |
-| `@deepseek-ai/cordis` (peer) | `^4.0.2` |
-| `@deepseek-ai/dsh-tools` (peer) | `^0.1.2-rc.1` |
-| `@deepseek-ai/schemastery` (peer) | `^3.18.0` |
-| `react` (peer, provided by the host web app) | `^18.2.0` |
-| Node | ≥ 20 |
-| tmux | 3.x (developed and verified on 3.6b) |
-| OS | Linux or macOS (WSL works) — a working `tmux` is required |
-| Session sandbox | **`danger-full-access` is required** — see [Security](#security) |
+| Peers | `@deepseek-ai/cordis` ^4.0.2, `dsh-tools` ^0.1.2-rc.1, `schemastery` ^3.18.0, `react` ^18.2.0 |
+| Node / tmux / OS | ≥ 20 / 3.x / Linux or macOS (WSL works) |
+| Session sandbox | **`danger-full-access` is required** — restricted modes cannot share the tmux server across calls |
+| Browser | no extra deps: hand-written JS + inline SVG, no build step |
+
+> Peer gotcha: on npm, `@deepseek-ai/dsh-tools`'s `latest` still points at a very old `0.0.1-rc.1`;
+> check `dist-tags`, not `npm view … version`.
 
 ## Install
 
 ```sh
-dsh plugin --profile web add dsh-agent-shell
+dsh plugin --profile web add dsh-agent-shell    # or file:/path/to/dsh-agent-shell
 ```
 
-Because the package declares `./cordis.patch.yml` under `dsh.bundle`, this inserts the plugin row
-for you and writes the package name into `dsh.profile.bundles`. **Do not also add an `insert` row
-by hand** — the id `agent-shell` may only appear once in the composition, and a duplicate makes
-`dsh web` fail at startup with `duplicate loader entry id: agent-shell`.
+`dsh plugin add` reads this package's `dsh.bundle.patch` and writes the name into
+`dsh.profile.bundles` for you. Restart `dsh web` once.
 
-Then **restart `dsh web`** once (client scanning happens at host startup).
+> ⚠️ Do **not** also insert a patch row by hand: the bundled patch already inserts `id: agent-shell`,
+> and the id may only appear once — a duplicate makes `dsh web` fail at startup with
+> `duplicate loader entry id: agent-shell`.
 
-Configuration lives on the `id: agent-shell` row and is fully optional — see the
-[Chinese README](./README.md#配置项) for the annotated defaults (`socket`, `httpBase`, `shell`,
-`cols`/`rows`, `historyLimit`, `maxSessions`, `defaultCwd`, `watchdog`,
-`guardDangerousCommands`, …).
+## Panel & tools
 
-## Use it
-
-**Panel (human).** Click the `>_ N 🔒` pill in the bottom-right corner. The panel is draggable and
-resizable (8 handles, geometry persisted in `localStorage`). Input is **locked by default**;
-click the lock to type, and it re-locks automatically when focus leaves the panel. There is **no
-local input buffer** — every keystroke goes straight to the shell, so completion, history, inline
-cursor motion and `Ctrl-R` are handled by the shell's own readline. CJK input methods are
-supported (composition state is tracked explicitly because browsers disagree about
-`isComposing`). Switching shells uses a picker with per-shell status dots, size, foreground
-command and buffer usage — jumping from shell 1 to shell 50 is two clicks.
-
-**Tools (model).**
+Panel: a lock (input is locked by default and re-locks on focus loss), a true no-buffer input model
+(every keystroke goes straight to the shell; CJK IMEs are supported), drag/8-handle resize with
+persistent geometry, a picker for switching many shells, `⤒` to push any residual text, and history
+view (default 200 lines, "more" doubles up to 5000).
 
 | Tool | Parameters (★ = required) | Purpose |
 |---|---|---|
-| `shell_open` | `name?` `cols?` `rows?` `cwd?` | create a background shell, return its first screen |
-| `shell_send` | ★`session` `text?` `preKeys?` `keys?` `confirm?` `settleMs?` | type like a human: `preKeys` → `text` → `keys` in one call |
-| `shell_read` | ★`session` | read the visible screen |
-| `shell_history` | ★`session` `lines?` | read the scrollback |
+| `shell_open` | `name?` `cols?` `rows?` `cwd?` | create a shell, return its first screen (`cwd` that doesn't exist errors out instead of silently landing elsewhere) |
+| `shell_send` | ★`session` `text?` `preKeys?` `keys?` `confirm?` `settleMs?` | type like a human: `preKeys` → `text` → `keys` |
+| `shell_read` / `shell_history` | ★`session` (`lines?`) | visible screen / scrollback |
 | `shell_list` | — | list shells with metrics |
-| `shell_resize` | ★`session` ★`cols` ★`rows` | resize a shell |
-| `shell_rename` | ★`session` ★`newName` | rename a shell (name is sanitized, `dsh-` prefix added) |
-| `shell_close` | ★`session` | close a shell |
-| `shell_diagnose` | — | server / watchdog / cwd status |
+| `shell_resize` | ★`session` ★`cols` ★`rows` | resize (clamped to 20–1000 × 5–500) |
+| `shell_rename` | ★`session` ★`newName` | rename (sanitized, `dsh-` prefix added) |
+| `shell_close` | ★`session` | close (idempotent: already-gone is success with `closed:false`) |
+| `shell_diagnose` | — | server / watchdog / cwd / **approval status** |
 
-Note the field names: only `shell_open` takes `name` (an optional label at creation time); every
-other tool takes **`session`**, and it is `required` in the schema — passing `name` there fails
-argument validation with `ToolArgsError: missing required property "session"`. The HTTP API below,
-by contrast, uses `name` in every request body.
+Field names differ on purpose: only `shell_open` takes `name`; every other tool takes **`session`**
+(required in the schema). HTTP request bodies use `name`.
 
 ```jsonc
 shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "keys": ["Escape"] }
 ```
 
-## Lifetime and orphan handling
+## HTTP endpoints
 
-The tmux server setsids and reparents itself, so the harness's managed-process cleanup cannot
-reach it. This plugin therefore arms a **detached watchdog** (`setsid -f`) that polls the harness
-pid and runs `kill-server` once the harness is gone — the only mechanism that survives
-`kill -9` or a crash. On startup the watchdog is **adopted** only when the recorded harness pid
-**is the current process** (a hot reload); otherwise the plugin just **re-arms** it and **never
-cleans sessions** — an existing server is reused. So hot reloads and quick `dsh web` restarts keep
-every shell (the watchdog's guard notices the new harness and leaves the server alone). Only when
-the harness is gone for more than ~6 seconds — a crash, or a slow restart — does the watchdog
-collect the server, which is the whole point of the orphan cleanup. Unload is deliberately a
-no-op: dispose runs on every config reload, and killing the server there would throw away your
-shells on every edit. The watchdog also **self-heals**: if its process dies (its liveness check
-used to give up after a single miss), the next operation notices within 5 seconds and re-arms it.
+Same-origin, `127.0.0.1`, **unauthenticated**: `GET /plugins/shell/{list, screen, diagnose}`,
+`POST /plugins/shell/{keys, new, kill, resize, rename}`.
 
-## Security
+## Known limits
 
-Read this before using it. **This plugin is intentionally a tool that lets an agent (and any
-local process that can reach the endpoint) do whatever you can do on your machine.**
+* **No approval gate** — the model's commands are never offered for allow/reject (see above).
+* **The guard is a heuristic speed bump, not a sandbox** — false positives and trivially bypassable.
+* **`danger-full-access` required**; restricted modes fail with `error connecting to /tmp/tmux-1000/...`.
+* Host-half code changes need a `dsh web` restart; client-half changes need a page refresh.
+* Text rendering, not terminal emulation (`capture-pane -p` drops colour/attributes).
+* Only shows shells this plugin created (it never touches your own `tmux`).
+* If the host is down for more than ~6 seconds, the orphan watchdog collects all shells.
 
-* **The HTTP endpoints have no separate authentication.** `/plugins/shell/*` is served by the
-  host web server on `127.0.0.1` and is *not* behind the SPA's login gate. Anything that can
-  reach that port — another local user, a same-origin page, a browser you left open — can send
-  keystrokes to your shells. Do not reverse-proxy it; set `exposeHttp: false` when you don't
-  need it.
-* **There is no approval gate.** DSH's approval seam (`dsh-user-approval`,
-  `ctx.approval`) is not integrated here, and in `danger-full-access` — the only mode this plugin
-  can operate in — the platform's own policy for it is `never`. The practical meaning is: the
-  model's commands are never shown to you for allow/reject. The panel's `审批 never` tag reports
-  exactly that. The only "confirmation" is the guard's `confirm: true` retry, which depends on the
-  model's cooperation rather than enforcing anything.
-* **`guardDangerousCommands` is a heuristic speed bump, not a sandbox.** It pattern-matches the
-  text you are about to send (`rm -rf /`, `mkfs`, `dd of=/dev/*`, `--no-preserve-root`, …). It is
-  trivially bypassable through concatenation, variables or script files, and it produces false
-  positives (e.g. a `[sudo] password for …` prompt echo). Use a real sandbox for real isolation.
-* **`danger-full-access` is required.** Under restricted modes (bwrap, private PID namespace)
-  each call gets its own sandbox and the tmux server cannot be shared across calls; the failure
-  looks like `error connecting to /tmp/tmux-1000/... (No such file or directory)`. Making it work
-  means opening the sandbox — weigh that yourself.
-* **Session isolation:** only the private socket is used, so your own `tmux` sessions are
-  untouched. The flip side: this plugin also does not show the tmux sessions you started by hand.
-* **Secrets pass through tool arguments.** Typing a `sudo` password with `shell_send` puts it in
-  the conversation log. Prefer keys or passwordless `sudo` for anything sensitive.
+## More detail
 
-## Versioning and releases
-
-Semver, currently `0.x` — minor releases may contain breaking changes, patches are fixes.
-Every release must have a matching `CHANGELOG.md` section; `npm run release:check` enforces
-version ⟷ CHANGELOG ⟷ the version stamp shown in the panel. The full release procedure (npm +
-GitHub, provenance, rollback) is in [PUBLISHING.md](./PUBLISHING.md) (Chinese).
+| File | Contents |
+|---|---|
+| [README.md](./README.md) | 中文首页（本文档的中文主版） |
+| [docs/使用细节.md](./docs/使用细节.md) | 配置项全表、面板/输入法细节、工具与 HTTP 参数（中文） |
+| [docs/设计与实现.md](./docs/设计与实现.md) | 解耦设计、生命周期与孤儿治理、踩坑注记、测试与发布（中文） |
+| [SECURITY.md](./SECURITY.md) | full security model: why there is no approval, unauthenticated HTTP, guard boundaries |
+| [PUBLISHING.md](./PUBLISHING.md) | release how-to (npm + GitHub, provenance, rollback; 中文) |
+| [CHANGELOG.md](./CHANGELOG.md) | per-version changes |
 
 ## License
 

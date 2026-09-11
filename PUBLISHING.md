@@ -289,7 +289,7 @@ npm view dsh-agent-shell version
 | `EPUBLISHCONFLICT` | 包名被别人占了 | `npm view dsh-agent-shell` 确认 |
 | `E422` / `EOTP` | 2FA / OTP 相关 | 检查账号 2FA 设置 |
 | CI 里 `npm publish` 401 | `NPM_TOKEN` 没配或过期 | 重新生成 granular token；或改用 Trusted Publisher |
-| 启动报 `duplicate loader entry id: agent-shell` | 同时用了 bundle 和手工 patch 行 | 见 README「两条路只能选一条」 |
+| 启动报 `duplicate loader entry id: agent-shell` | 同时用了 bundle 和手工 patch 行 | 见 `docs/使用细节.md`「两条路只能选一条」 |
 
 ---
 
