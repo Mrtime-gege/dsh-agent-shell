@@ -238,6 +238,115 @@ if (existsSync(clientPath)) {
   }
 }
 
+/* ---------- 6.3 客户端只能用真实存在的 DSH 主题令牌，且不许硬编码颜色 ---------- */
+
+// 实测踩过的坑：面板里写了 `var(--dsw-alias-bg-primary, #16181d)` 这种**并不存在**的令牌，
+// 于是永远落到硬编码的深色上 —— 深色主题里颜色偏、**浅色主题里直接变成一块黑板子**，
+// 完全不像 DSH 的一部分。这里把「令牌必须真实存在」变成机械检查。
+const THEME_TOKENS = [
+  '--dsw-alias-bg-base',
+  '--dsw-alias-bg-layer-1',
+  '--dsw-alias-bg-layer-2',
+  '--dsw-alias-bg-layer-3',
+  '--dsw-alias-bg-mask-1',
+  '--dsw-alias-bg-mask-2',
+  '--dsw-alias-bg-mask-3',
+  '--dsw-alias-bg-mask-drop',
+  '--dsw-alias-bg-mask-photo',
+  '--dsw-alias-bg-module-platform',
+  '--dsw-alias-bg-multi-select',
+  '--dsw-alias-bg-overlay',
+  '--dsw-alias-bg-skeleton',
+  '--dsw-alias-border-inverted',
+  '--dsw-alias-border-inverted2',
+  '--dsw-alias-border-l1',
+  '--dsw-alias-border-l2',
+  '--dsw-alias-border-l2-darkmode-thin',
+  '--dsw-alias-border-l3',
+  '--dsw-alias-border-l4',
+  '--dsw-alias-brand-primary',
+  '--dsw-alias-brand-primary-invert',
+  '--dsw-alias-brand-primary-new-colorprimary-new-color',
+  '--dsw-alias-brand-text',
+  '--dsw-alias-button-contrast-fill',
+  '--dsw-alias-button-elevated-fill',
+  '--dsw-alias-button-floating-fill',
+  '--dsw-alias-button-floating-hover',
+  '--dsw-alias-button-ghost-active-border',
+  '--dsw-alias-button-ghost-active-fill',
+  '--dsw-alias-button-ghost-active-hover',
+  '--dsw-alias-button-info-fill',
+  '--dsw-alias-button-info-hover',
+  '--dsw-alias-button-primary-dimmed',
+  '--dsw-alias-button-primary-fill',
+  '--dsw-alias-button-primary-hover',
+  '--dsw-alias-button-tool-bar-fill',
+  '--dsw-alias-button-tool-bar-fill-invisible',
+  '--dsw-alias-button-tool-bar-hover',
+  '--dsw-alias-interactive-bg-active',
+  '--dsw-alias-interactive-bg-hover',
+  '--dsw-alias-interactive-bg-hover-accent',
+  '--dsw-alias-interactive-bg-hover-danger',
+  '--dsw-alias-interactive-bg-hover-solid',
+  '--dsw-alias-label-caption',
+  '--dsw-alias-label-dimmed',
+  '--dsw-alias-label-primary',
+  '--dsw-alias-label-primary-bluish',
+  '--dsw-alias-label-primary-dimmed',
+  '--dsw-alias-label-primary-foreground',
+  '--dsw-alias-label-primary-inverted',
+  '--dsw-alias-label-secondary',
+  '--dsw-alias-label-tertiary',
+  '--dsw-alias-markdown-citation',
+  '--dsw-alias-markdown-code-block',
+  '--dsw-alias-markdown-code-block-banner',
+  '--dsw-alias-markdown-code-segment-selected',
+  '--dsw-alias-markdown-code-segment-unselected',
+  '--dsw-alias-markdown-inline-code',
+  '--dsw-alias-markdown-placeholder',
+  '--dsw-alias-markdown-tag',
+  '--dsw-alias-scrollbar-bg-l1',
+  '--dsw-alias-scrollbar-bg-l2',
+  '--dsw-alias-scrollbar-hover-l1',
+  '--dsw-alias-scrollbar-hover-l2',
+  '--dsw-alias-state-business-primary',
+  '--dsw-alias-state-business-tertiary',
+  '--dsw-alias-state-error-primary',
+  '--dsw-alias-state-error-secondary',
+  '--dsw-alias-state-success-primary',
+  '--dsw-alias-state-success-secondary',
+  '--dsw-alias-state-success-tertiary',
+  '--dsw-alias-state-warn-label',
+  '--dsw-alias-state-warn-primary',
+  '--dsw-alias-state-warn-secondary',
+  '--dsw-alias-state-warn-tertiary',
+  '--dsw-alias-toast-bg',
+  '--dsw-alias-tooltip-bg'
+]
+if (existsSync(clientPath)) {
+  const client = readFileSync(clientPath, 'utf8')
+  const used = [...new Set([...client.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map(m => m[1]))]
+  const unknown = used.filter(name => !THEME_TOKENS.includes(name))
+  const isAlias = /^--dsw-alias-/
+  const strayAlias = used.filter(name => isAlias.test(name) && !THEME_TOKENS.includes(name))
+  if (strayAlias.length > 0) {
+    fail(`lib/client.js 引用了不存在的主题令牌：${strayAlias.join(', ')}（会静默回落到 fallback 颜色，浅色主题下必然错）`)
+  } else {
+    notes.push(`主题令牌全部存在（引用 ${used.length} 个 alias 令牌）`)
+  }
+  void unknown
+
+  // 硬编码颜色：颜色一旦写死，就不会跟随主题。确实需要（例如遮罩）就把字面量加进白名单并写明理由。
+  const ALLOWED_COLOR_LITERALS = []
+  const literals = [...new Set([...client.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)].map(m => m[0]))]
+  const stray = literals.filter(v => !ALLOWED_COLOR_LITERALS.includes(v))
+  if (stray.length > 0) {
+    fail(`lib/client.js 里出现硬编码颜色：${stray.join(', ')}（请改用 --dsw-alias-* 令牌，否则不跟随主题）`)
+  } else {
+    notes.push('没有任何硬编码颜色（全部走主题令牌）')
+  }
+}
+
 /* ---------- 6.5 安全告警不许被悄悄删掉 ---------- */
 
 // 这不是格式检查，而是一条**产品承诺**：README 顶部必须持续告诉使用者

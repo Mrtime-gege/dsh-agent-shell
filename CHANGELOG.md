@@ -29,6 +29,32 @@
   新宿主复用已有服务端。宿主停机超过约 6 秒（崩溃、慢重启）则仍会被看门狗收掉。
 - 启动时不再有任何「清孤儿」动作；想清空请显式 `killServer()` / `shell_close`。
 
+### 面板融入 DSH 原生主题
+
+面板之前**没有跟随 DSH 主题**：代码里写的 `var(--dsw-alias-bg-primary, #16181d)` /
+`var(--dsw-alias-border-primary, #2a2f3a)` 这两个令牌**在 DSH 里根本不存在**，
+于是永远落到硬编码的深色上 —— 深色主题里色偏，**浅色主题里就是一块突兀的黑板子**。
+
+本次按 DSH 的真实设计语言重做配色（令牌名与取值取自 `dsh-client-ui-theme`）：
+
+- 表面层级：面板 `bg-layer-1`、弹层（选择器 / ⓘ）`bg-layer-3`、终端区
+  `markdown-code-segment-unselected`、输入框 `bg-layer-2`；
+- 文字三级：`label-primary` / `label-secondary` / `label-tertiary`；
+- 描边统一 **0.5px 发丝线**（DSH 全库只用 .5px）`border-l1` / `border-l2`；
+- 按钮改用专用令牌：标题栏 `button-tool-bar-fill/hover`、悬浮胶囊 `button-floating-fill`、
+  开关态 `button-ghost-active-fill/border`、主操作（＋）`button-primary-fill` +
+  `label-primary-inverted`、危险 hover `interactive-bg-hover-danger`；
+- 行 hover / 选中：`interactive-bg-hover` / `interactive-bg-active`；
+- **去掉全部装饰性彩色**（原来的蓝色强调）—— DSH 的原生强调是单色的（`brand-primary`
+  在亮色下近黑、暗色下近白），彩色只保留给状态：`state-success/warn/error-primary`；
+- 投影由 `0 16px 48px rgba(0,0,0,.5)` 改为轻量的 `0 6px 20px bg-mask-1`。
+
+现在**零硬编码颜色**，亮色/深色两套主题都自动跟随。
+
+`npm run release:check` 新增两条不变量防止复发：客户端引用的每个 `--dsw-*` 令牌必须在
+官方令牌表内（写错名字会静默回落到 fallback 颜色，浅色主题下必然出错），且不允许出现
+硬编码颜色字面量。
+
 ### 安全与知情（如实告知，而不是加一层防护）
 
 本插件没有接入 DSH 官方审批（`dsh-user-approval` / `tools/pre-execute` → `ctx.approval.request`）。
