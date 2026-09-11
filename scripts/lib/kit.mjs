@@ -171,6 +171,11 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
       if (names.includes('webServer')) {
         cb({ get: (n) => (n === 'webServer' ? webServer : undefined), webServer, effect })
       }
+      // 插件用 ctx.inject(['settings']) 惰性注册（服务晚挂载也能注册上），
+      // 所以假 ctx 也必须在 inject 里提供它 —— 否则 changeSettings 会报"未启用假服务"。
+      if (names.includes('settings') && settings !== undefined) {
+        cb({ get: (n) => (n === 'settings' ? settings : undefined), settings, effect })
+      }
       if (names.includes('systemPrompt') && systemPrompt !== undefined) {
         cb({ get: (n) => (n === 'systemPrompt' ? systemPrompt : undefined), systemPrompt, effect })
       }

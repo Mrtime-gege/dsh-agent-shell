@@ -216,7 +216,7 @@ mod.apply(ctx, {
   extendedKeys: true, auditDir: join(root, 'audit'),
 })
 
-check(tools.size === 10, `注册工具数 = ${tools.size}（期望 10）`)
+check(tools.size === 11, `注册工具数 = ${tools.size}（期望 11）`)
 check(routes.size === 9, `注册 HTTP 路由数 = ${routes.size}（期望 9）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）

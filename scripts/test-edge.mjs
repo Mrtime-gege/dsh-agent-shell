@@ -38,7 +38,7 @@ if (!existsSync(tgz)) {
 console.log(`peer 来自 ${peersDir}\n测试产物 ${tgz}\n`)
 
 const h = await makeHarness({ tgz, peersDir, socket: SOCKET, config: { maxSessions: 3, __withSettings: true, __withSystemPrompt: true } })
-const { run, call, tmux } = h
+const { run, call, tmux, tools } = h
 const { check, rejects, report } = makeChecker()
 
 const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s => s.name)
@@ -549,7 +549,63 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   h3.cleanup()
 }
 
-/* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */
+/* ── 7.93 新会话默认落在**当前对话的工作目录** ─────────────────────────────── */
+
+{
+  const hCwd = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-cwd`,
+    config: { watchdog: false, defaultCwd: '/', __consentMode: 'ok' },
+  })
+  // 平台的取法就是 agent.session.header.cwd（dsh-agent-loop 注册 cwd 变量用的同一路径）
+  const withConv = { agent: { session: { id: 'cwd-conv', header: { cwd: '/tmp' } } } }
+  const opened = await hCwd.run('shell_open', { name: 'cwd-conv' }, withConv)
+  check(String(opened).includes('cwd /tmp (conversation)'),
+    `对话工作目录优先于配置回退：${String(opened).split('\n')[0]}`)
+  // 显式 cwd 仍然最优先（调用方说了算）
+  const explicit = await hCwd.run('shell_open', { name: 'cwd-explicit', cwd: '/' }, withConv)
+  check(String(explicit).includes('cwd / (explicit)'), `显式 cwd 优先于对话目录：${String(explicit).split('\n')[0]}`)
+  // 拿不到对话时（面板/无 agent）才用配置回的退值
+  const fallback = await hCwd.call('/new', 'POST', { name: 'cwd-fallback' })
+  check(fallback.body.cwd === '/' && fallback.body.cwdSource === 'configured-fallback',
+    `面板建的会话用配置回退值：cwd=${fallback.body.cwd} source=${fallback.body.cwdSource}`)
+  // 不可用的对话目录必须报错，而不是静默换目录
+  const bad = await hCwd.run('shell_open', { name: 'cwd-bad' }, { agent: { session: { id: 'cwd-conv', header: { cwd: '/nonexistent-cwd-dir' } } } })
+    .then(() => null).catch((e) => e)
+  check(bad !== null && String(bad.message).includes('no such directory'),
+    `对话目录不存在时明确报错（不静默落到别处）：${String(bad?.message).slice(0, 50)}`)
+  await hCwd.run('shell_close', { session: 'dsh-cwd-conv' }, withConv)
+  await hCwd.run('shell_close', { session: 'dsh-cwd-explicit' }, withConv)
+  await hCwd.call('/kill', 'POST', { name: 'dsh-cwd-fallback' })
+  hCwd.cleanup()
+}
+
+/* ── 7.94 shell_consent：让模型能查"我得到授权了吗"，但不许频繁查 ───────────── */
+
+{
+  const hConsent2 = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-qconsent`,
+    config: { watchdog: false, __actor: 'consent-query-session' },
+  })
+  const before = await hConsent2.run('shell_consent', {})
+  check(String(before).includes('consent gate: enabled'), `如实报告闸门状态：${String(before).split('\n')[0]}`)
+  check(String(before).includes('NOT YET'), '未授权时明确说"还没有"，并说明下一次调用会问一次')
+  check(String(before).includes('revoke') && String(before).includes('consent.json'),
+    '给出撤销方式（用户能自己收回授权）')
+  check(String(before).includes('this conversation: consent-query-session'),
+    '报告本次对话身份（而不是笼统的"已授权"）')
+  check(hConsent2.consent.asks.length === 0, '查询本身**不会**触发确认弹窗（查就是查）')
+  await hConsent2.run('shell_open', { name: 'qconsent' })
+  const after = await hConsent2.run('shell_consent', {})
+  check(String(after).includes('granted: yes'), `授权后再查显示已授权：${String(after).split('\n')[2]}`)
+  await hConsent2.run('shell_close', { session: 'dsh-qconsent' })
+  // 工具描述里必须写明"别频繁查" —— 这条措辞是行为约束的一部分，用断言钉住
+  const desc = String(tools.get('shell_consent')?.description ?? '')
+  check(desc.includes('Do NOT call this routinely'), '工具描述里明确写了「不要例行调用」')
+  check(desc.includes('failed') || desc.includes('unclear'), '工具描述里说明了「只在需要时或失败时查」')
+  hConsent2.cleanup()
+}
+
+/* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── *//* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */
 
 {
   // 用**全新** harness：主 harness 在更早的小节里已经授权过，那不是"第一次"

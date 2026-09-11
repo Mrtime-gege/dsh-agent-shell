@@ -410,6 +410,29 @@ if (typeof auditRowValue === 'function') {
   check(tmuxRowValue({}).includes('未知'), '体检未完成/旧宿主 → 未知')
 }
 
+/* ── 「关闭 shell」必须两步（它与「收起」相邻但后果不可撤销）────────────────── */
+
+const closeActionFor = plugin?.__closeActionFor
+const closeButtonModel = plugin?.__closeButtonModel
+check(typeof closeActionFor === 'function' && typeof closeButtonModel === 'function', '关闭按钮的两步语义已暴露')
+
+if (typeof closeActionFor === 'function' && typeof closeButtonModel === 'function') {
+  check(closeActionFor(false) === 'arm', '第一次点击只进入待确认，不真的关闭')
+  check(closeActionFor(true) === 'close', '第二次点击（待确认态）才真的关闭')
+  check(closeActionFor(undefined) === 'arm', '状态缺失时也走保守路径（先确认，不直接关）')
+
+  const idle = closeButtonModel(false)
+  const armed = closeButtonModel(true)
+  check(idle.className === 'dshsh-btn danger' && !idle.className.includes('armed'), `静止态外观：${idle.className}`)
+  check(armed.className.includes('danger') && armed.className.includes('armed'),
+    `待确认态换成醒目样式：${armed.className}`)
+  check(armed.title.includes('再点一次') && idle.title.includes('再点一次'),
+    '工具提示在两种状态下都说清"要再点一次"（避免用户以为第一次就关掉了）')
+  check(idle.title.includes('不可撤销') || idle.title.includes('连同其中运行的进程'),
+    `工具提示说明后果（会杀掉里面的进程）：${idle.title}`)
+  check(armed.label === '确认关闭' && idle.label === '关闭', '无鼠标时的可读标签也区分两态')
+}
+
 const fenceRowValue = plugin?.__fenceRowValue
 check(typeof fenceRowValue === 'function', '闸门显示函数 __fenceRowValue 已暴露')
 

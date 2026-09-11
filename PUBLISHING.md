@@ -1,345 +1,359 @@
-# 发布指南
+# 使用细节
 
-本文件是 `dsh-agent-shell` 的完整发布教程：**发到 GitHub** 与 **发到 npm** 的全流程，
-包含版本策略、自动化检查、provenance、回滚，以及会踩的坑。
+本文件是 [README](../README.md) 的细节补充：配置项全表、改代码后何时需要重启、
+面板的完整行为（含输入法为什么这么写）、以及模型工具与 HTTP 的参数细节。
+首页只放重点，全部细节在这里。
 
-按顺序做完即可。第一次发布约 20 分钟，后续每次发版约 3 分钟（见[第 7 节](#7-后续版本发布清单)）。
 
----
+> 关于「为什么不能同时用 bundle 和手工 patch」、以及二选一之后怎么自检：
+## ⚠️ 两条路只能选一条（这条踩过，代价是启动直接失败）
 
-## 0. 一次性准备
+本包自带 bundle patch，其中 `insert` 了 `id: agent-shell` 这一行。所以**再手工往用户 patch 层
+插一行同 id 的行，就会重复**：
 
-| 项 | 要求 | 检查命令 |
-|---|---|---|
-| Node / npm | ≥ 20（实测 Node 24 / npm 12） | `node -v && npm -v` |
-| npm 账号 | 已注册 + **已验邮箱** + 已开 2FA | `npm whoami` |
-| 包名 | **`dsh-agent-shell` 在公共 npm 上无人占用**（已核实） | `npm view dsh-agent-shell version` → 期望 `E404` |
-| git 身份 | 用于 commit 署名 | `git config user.name && git config user.email` |
-| GitHub | 账号；有 `gh` CLI 更省事 | `gh auth status` |
-
-> npm 现在对发布强制要求 **2FA**：手工 `npm publish` 会要一次性验证码（OTP）。
-> **本仓库已改用 Trusted Publisher**（见 [4.1](#41-路线-atrusted-publisher--oidc--本仓库已配置默认路线)）：
-> 推 tag 由 CI 用 OIDC 身份发布，既不需要 OTP，也不需要长期 token。
-
-**npm 与 GitHub 的关系**：两者互相独立。GitHub 放源码，npm 放可分发的包。
-本指南两条都做，npm 上的 `repository` 字段会让 npm 页面显示「源码在 GitHub」。
-
----
-
-## 1. 发布前自检（已自动化，务必跑）
-
-```sh
-npm run check           # 语法：node --check 三个入口文件
-npm run release:check   # 发版不变量（见下）
-npm pack --dry-run      # 真实打包清单，看有没有漏文件/多文件
+```
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include):
+       duplicate loader entry id: agent-shell
 ```
 
-`release:check` 会机械地卡住这几类事故：
+这不是警告级别的配置问题 —— 它会让 `dsh web` **完全起不来**。两条路是：
 
-| 检查 | 不通过会怎样 |
+| 路线 | 做法 | 特点 |
+|---|---|---|
+| **bundle（推荐，`dsh plugin add` 的默认行为）** | 只保留 `dsh.profile.bundles` 里的包名 | 零手工编辑，最不容易出错；改动需重启 |
+| 用户 patch 层 | 从 `bundles` 里删掉包名，改为在 `profiles/<name>/cordis.patch.yml` 里 `insert` 一行 | 该文件热加载，**改配置**不必重启；但要手工维护，且极易与 bundle 声明撞车 |
+
+无论选哪条，**同一个 `id` 在整份组合里只能出现一次**。改完可以这样自检：
+
+```sh
+node -e "console.log(require('$HOME/.dsh/profiles/web/package.json').dsh.profile.bundles)"
+grep -n 'agent-shell' "$HOME/.dsh/profiles/web/cordis.patch.yml"   # 走 bundle 时这里应当没有输出
+```
+
+## 配置项
+
+两种改法，改的是同一份参数：
+
+1. **设置页（推荐）**：**DSH 设置 → 插件 → `dsh-agent-shell`**。表单由 schema 直接生成，
+   每个字段都带说明（说明里写明「立即生效」还是「需重启」），改完持久化进设置文件。
+2. **`cordis.patch.yml`**：给 `id: agent-shell` 那一行写 `config`（下面的形式）。
+
+设置页是**可选服务**：`ctx.settings` 不在时插件照样工作，只是没有那张卡片。反过来，如果组合
+配置里有越界值导致设置页注册被拒，插件仍按组合配置运行，不会因为一条 YAML 起不来。
+
+这件事在面板的 ⓘ 详情层里有一行 **「参数设置」**，三态分得很清，不猜也不谎报：
+
+| 显示 | 含义 |
 |---|---|
-| `package.json` 版本号是合法 semver、且**不是 `private`** | 发不出去 / 发出去了也装不上 |
-| `CHANGELOG.md` 里有 `## <当前版本>` 段落 | 版本记不住改了什么 |
-| `files` 白名单覆盖 `lib`、`cordis.patch.yml`、两份 README、CHANGELOG、LICENSE | 装完之后插件起不来（patch 或入口不在包里） |
-| `main` / `exports` 指向的文件**存在且在白名单内** | 用户 `import` 直接 404 |
-| `peerDependencies` 覆盖 `@deepseek-ai/cordis`、`dsh-tools`、`schemastery`、`react` | 用户在别的 DSH 版本上炸 |
-| `lib/client.js` 仍是 **classic script**（没有 `import`/`export`） | 面板在浏览器里整体崩掉 |
-| `lib/client.js` 的 `PKG_VERSION` 与 `package.json` **一致** | 用户报障时报错版本 |
-| 源码里没有泄漏 `/home/<user>/` 路径、私钥、npm/GitHub token | 隐私与凭据事故 |
-| `cordis.patch.yml` 仍在 insert `id: agent-shell` | 装了但什么也不做 |
+| `已接入（DSH 设置 → 插件里改）` | 注册成功，现在就能去设置页改 |
+| `未注册：<原因>` | 服务在，但注册被拒（例如 `shell 不能为空`）；悬停看完整原因 |
+| `未知（宿主未上报，需重启 dsh web）` | 老宿主（0.1.2 之前）的 `/list` 里根本没有这个字段 —— 如实说不知道 |
 
-`npm publish` 会自动先跑一遍（`prepublishOnly`），所以这一步是双保险；
-但**在打 tag 之前**手动跑一次，能避免打出「代码有问题」的 tag。
+下面是全部 14 个参数（全部可选，括号里是默认值）：
 
----
+```yaml
+config:
+  socket: dsh-agent                     # 私有 tmux 服务端 socket 名（与用户自己的 tmux 隔离）
+  httpBase: /plugins/shell              # 同源 HTTP 前缀
+  exposeHttp: true                      # 是否暴露 HTTP（面板依赖它）
+  exposeTools: true                     # 是否注册 shell_* 工具
+  watchdog: true                        # 脱离进程树的孤儿看门狗
+  shell: bash                           # 每个会话启动的程序
+  defaultTerminal: tmux-256color        # 写进服务端启动配置的 TERM
+  cols: 120                             # 新会话默认列数（夹到 20–1000）
+  rows: 32                              # 新会话默认行数（夹到 5–500）
+  historyLimit: 100000                  # 每会话滚动缓冲上限（行）
+  maxSessions: 8                        # 同时在世的会话数上限
+  defaultCwd: ''                        # **回退**起始目录：拿不到对话目录时才用（留空取 $HOME）
+  guardDangerousCommands: true          # 高危命令启发式拦截（减速带，不是沙箱）
+  allowedHosts: []                      # 额外信任的 Host（反向代理部署用；默认空 = 只信回环）
+  requireConsent: true                  # 首次使用确认门：一个对话第一次用工具前先请用户确认
+  auditDir: ''                          # 审计与留痕目录；留空 = ${DSH_HOME:-~/.dsh}/agent-shell
+  audit: true                           # 输入流水：进入终端的每一个字节都记账
+  auditRetentionDays: 30                 # 审计日志按天轮转，保留天数
+  captureOutput: true                   # 输出留痕：终端输出原样落盘，会话关掉后仍在
+  captureMaxBytes: 67108864             # 单会话留痕上限（字节），触顶自动停止并留痕
+  extendedKeys: false                   # 服务端开启 extended-keys（需 tmux ≥ 3.2，见下）
+```
 
-## 2. 决定版本号（版本策略）
+### 哪些立即生效，哪些要重启
 
-### 2.1 语义
+| 立即生效 | 需重启 `dsh web` |
+|---|---|
+| `watchdog` `shell` `cols` `rows` `maxSessions` `defaultCwd` `guardDangerousCommands` `allowedHosts` `requireConsent` `audit` `auditRetentionDays` `captureOutput` `captureMaxBytes` | `socket` `httpBase` `exposeHttp` `exposeTools` `defaultTerminal` `historyLimit` `extendedKeys` |
 
-当前处于 **`0.x`**：
+> `shell` 与 `captureOutput` 只影响**之后新建**的会话；`auditDir` 改了之后，已在进行的会话仍写在原目录。
 
-| 变更 | 版本 | 例子 |
+右边这些「改不了就是改不了」：`historyLimit` / `defaultTerminal` / `extendedKeys` 写在 tmux
+服务端启动时读的那份 `-f` 配置里，`socket` 决定的是另一个服务端，`httpBase` / `expose*` 是
+注册期就固定的路由与工具。插件不会假装生效 —— 改完会在面板里列出「下列项要重启 dsh web 才生效」。
+
+设置页对取值有校验（`validateSettings`）：`cols` 20–1000、`rows` 5–500、`historyLimit`
+100–1000000、`maxSessions` 1–64、`socket` 只能是字母数字下划线短横线、`httpBase` 必须以 `/`
+开头、`shell` 不能为空、`allowedHosts` 只能是 `host` 或 `host:port`（不接受协议前缀、路径或 `*`）。**越界会被当场拒绝并说明范围**；而组合配置（YAML）里写了越界值仍按
+老规矩在用时夹住（`clampCols`/`clampRows`），不会因为一条配置就让插件装不上。
+
+**`extendedKeys`**（默认关）：打开后服务端配置里会多一行 `set -g extended-keys on`，
+TUI 程序（pi、codex 之类）才能收到 `Shift+Enter` 这类**带修饰键**的按键；不开时它们会打印
+`Warning: tmux extended-keys is off. Modified Enter keys may not work.`。
+
+默认关闭是刻意的：`extended-keys` 需要 **tmux ≥ 3.2**，而它写在服务端启动读的 `-f` 配置里 ——
+**未知选项会让服务端起不来**，那种故障很难当场反应过来。已在 tmux 3.6b 上实测开启后
+建会话、按键投递、会话存活都正常（`npm run smoke` 覆盖了这条路径）。
+
+
+### 浏览器面闸门（HTTP 路由的防线）
+
+面板与宿主半之间的 HTTP 路由**没有鉴权**，所以它们前面有一道闸门。默认（服务绑在 `127.0.0.1`）
+要求：`Host` 是回环地址且端口一致（挡 DNS rebinding）、不带 `Sec-Fetch-Site: cross-site`、
+`Origin` 与 `Host` 同源、**写请求带 `Content-Type: application/json`**。不满足就 `403`，
+被拒的请求会记进面板 ⓘ 的「浏览器面闸门」一行与 `shell_diagnose`（最近 8 条）。
+
+两类部署要留意：
+
+* **反向代理**：代理转发过来的 `Host` 不是回环地址 → 会被拒。把对外域名加进 `allowedHosts`
+  （`host` 或 `host:port`）即可；**每加一条就削弱一分 DNS rebinding 防护**，只加你真的在用的。
+* **服务绑定 `0.0.0.0`**：无法用 `Host` 判断是否本机，闸门降级为「只挡跨站」，面板会以 `⚠`
+  明确标出「Host 围栏不可用」。这不是 bug，是这套信息不足时唯一诚实的选择。
+
+### 新 shell 的工作目录
+
+由工具新建的会话默认落在**当前对话的工作目录**（平台自己的取法：`agent.session.header.cwd`），
+不是插件的 `defaultCwd`。优先级：
+
+| 优先级 | 来源 | 什么时候 |
 |---|---|---|
-| 修 bug、文档、不影响行为的重构 | **patch** `0.1.0 → 0.1.1` | 修 IME 提交时序 |
-| 新功能、**`0.x` 下允许的破坏性改动**（改工具名/参数、改 UI 结构、改 HTTP 路由、提高 peer 下限） | **minor** `0.1.1 → 0.2.0` | 新增 `shell_rename` |
-| 预发布 | `0.2.0-rc.1` / `0.2.0-beta.2` | 先让少数人试 |
+| 1 | 调用参数 `cwd` | AI 明确指定（或你让它这么做） |
+| 2 | **当前对话的工作目录** | 工具路径（有会话信息） |
+| 3 | `defaultCwd` → `$HOME` | 面板里点 ＋ 新建、或拿不到对话信息时 |
 
-> `1.0.0` 之后语义反转：破坏性改动才升 major。在 `0.x` 阶段请把**破坏性改动写进 CHANGELOG 的醒目位置**。
+`shell_open` 的返回值里会写明来源：`cwd /path/to/workspace (conversation)` /
+`(explicit)` / `(configured-fallback)` —— 命令跑在哪个目录不该靠猜。目录不存在时**明确报错**
+（`no such directory: …`），不会静默落到别处。
 
-### 2.2 一次发版必须同步三处（不要漏）
+### 授权门：一个对话第一次使用时需要你确认
 
-```sh
-# 1) 版本号（会顺带打 git tag，见 3.3）
-npm version patch --no-git-tag-version     # 或 minor / major，或 npm version 0.2.0-rc.1
+第一次在某个对话里让 AI 用本插件（`shell_open` / `shell_send`），会先弹一个问题：**同意就等于
+授权这个对话的 AI 在这些 shell 上执行任意命令**（权限等同你自己），命令不会再有逐条询问。
 
-# 2) CHANGELOG.md —— 手工加一段，标题必须是 "## <版本>"
+| 情形 | 行为 |
+|---|---|
+| 同意 | 记录该对话已授权；同对话后续调用不再询问。授权落盘，热重载/重启后不重复问 |
+| 拒绝 | **真的挡住**：不创建 shell、不发送任何输入；并告诉模型不要重试 |
+| 换一个对话 | 需要各自确认一次（授权是按对话记的） |
+| 面板里你自己敲键 | **不问**（那是你在操作，不是 AI；但会留一条审计） |
+| 子代理调用 | 没有人可以问（DSH 的提问服务不向子代理转发问题，问了会永久阻塞）：本进程内已有人类授权则**继承**并如实记录，否则明确拒绝并说明该在主对话先确认 |
+| 部署没有提问服务 | **拒绝**（问不到人不等得到授权）；配置出口是 `requireConsent: false` |
 
-# 3) lib/client.js 里的版本戳记（面板会显示给用户看）
-```
+模型可以用 **`shell_consent`** 工具查"我这个对话得到授权了吗"（会报告闸门是否开启、本对话是否已授权、
+本进程内的授权列表与撤销方式）。工具描述里明确写了**不要例行查询** —— 闸门在 `shell_open` /
+`shell_send` 上自动生效，正常调用本身就会告诉它；只有"需要先知道能不能用"或"调用失败原因不明"时才该查。
 
-第 3 步是唯一需要手工改代码的地方，`release:check` 会强制它与 `package.json` 一致：
+关掉它（`requireConsent: false`）等于放弃这道闸门 —— 那意味着 AI 可以在你不知情时开 shell 并执行
+命令。想撤销某个对话的授权：删除 `~/.dsh/agent-shell/consent.json` 里对应条目（或整个文件）。
 
-```sh
-grep -n "PKG_VERSION = " lib/client.js     # 改完再跑一次 npm run release:check
-```
+### 审计与留痕（谁在什么时候让 shell 干了什么）
 
-面板指标行显示 `v0.1.0 · c11` —— 用户报障时直接报这一行，你就能判断他跑的是哪一版。
+跨对话保活与跨对话隔离是互斥的：任何对话都能看到并操作任何 shell（在 A 对话里 `shell_list`
+就能列出 B 对话创建的会话）。所以这里不假装隔离，而是把**事后可查**做扎实：
 
-### 2.3 预发布不要污染 `latest`
+| 层 | 记什么 | 在哪 | 关掉会话后 |
+|---|---|---|---|
+| **输入流水** | 进入终端的每一个字节：时间、shell、来源（工具 / 面板）、发起会话 id、text/keys、护栏决策与结果；**被拦下的企图也记** | `audit-YYYY-MM-DD.jsonl` | 仍在 |
+| **输出留痕** | 终端输出（含回显的命令、程序输出、TUI 画面），原始字节流 | `output/<shell>-<起始>.log` | **仍在**（这才是"关闭后依然可见"） |
+| **归属标注** | 谁开的（发起会话 id，面板建的记 `panel`，插件之外建的记 `unknown`） | `sessions.json` + `shell_list` 的 `owner=` | 随会话消失，日志里仍在 |
 
-```sh
-npm version 0.2.0-rc.1 --no-git-tag-version
-npm publish --tag next        # 装到 next 上；latest 仍是 0.1.x
-# 转正式：改回 0.2.0、更新 CHANGELOG，然后 npm publish
-```
-
----
-
-## 3. 发布到 GitHub
-
-### 3.1 首次：建立仓库
-
-这台机器上**已经**执行过 `git init -b main` 与 `git add -A`（24 个文件已暂存，未提交），
-所以下面第 1 步之后可以直接提交。
-
-```sh
-cd ~/dsh-agent-shell
-
-# 1) 先配提交署名 —— 没配过身份时 git 会直接拒绝提交（"Please tell me who you are"）。
-#    只在没配过的时候需要；配过就跳过。
-git config --global user.name  "你的名字"
-git config --global user.email "you@example.com"
-
-# 2) 首次提交
-git commit -m "feat: dsh-agent-shell 0.1.0 — 持久化多 shell 终端面板"
-```
-
-> 想用不同身份提交这个仓库，把 `--global` 换成不带参数（只写入本仓库的 `.git/config`）。
-> 提交之后再改身份不会改历史，改历史要 `git commit --amend --reset-author`（未推送时可用）。
-
-用 `gh` CLI（最省事）：
+怎么读：
 
 ```sh
-gh auth status
-gh repo create dsh-agent-shell --public --source=. --push
+shell_audit                                     # 模型侧：读最近 1 天
+shell_audit {"session":"dsh-build","lines":100}  # 只看某个 shell
+curl 'http://127.0.0.1:3080/plugins/shell/audit?name=dsh-build&lines=50'
+tail -f ~/.dsh/agent-shell/audit-$(date +%F).jsonl   # 直接看原始流水
+cat ~/.dsh/agent-shell/output/dsh-build-*.log        # 回看某个会话的终端现场
 ```
 
-> 本机**没有装 `gh`**（`command -v gh` 无输出）。要装：`sudo apt install gh` 后 `gh auth login`；
-> 不想装就走下面的手工路线，效果一样。
+三条必须知道的边界：
 
-或者手工：在 GitHub 上新建一个**空仓库**（**不要**勾选 README / .gitignore / LICENSE，
-否则会和本地已有的冲突，push 会被拒），然后：
+1. **它是本机文件**（目录 0700、文件 0600）：能读你 home 的进程就能改它 —— 解决"查得清"，
+   不解决"防抵赖"。要后者需要 hash 链或只读归档。
+2. **面板侧的人类输入只能记到 `panel` 这一粒度**（浏览器里无法区分是谁、哪个标签页）。
+3. **留痕会把终端里出现过的敏感内容一起记下来**（密码、令牌、打印出来的密钥）。不需要就
+   `captureOutput: false`；需要长期回看就把 `auditDir` 指到加密卷。留痕触顶（默认 64 MiB/会话）
+   会自动停止**并记一条审计** —— 磁盘上少了一段，必须有人知道。
 
-```sh
-git remote add origin git@github.com:Mrtime-gege/dsh-agent-shell.git
-git push -u origin main
-```
+## 什么时候需要重启
 
-### 3.2 仓库专属的占位内容（本仓库已填好）
+**ESM 按 file URL 缓存模块**，所以：
 
-本仓库的地址已经按实际归属 **`Mrtime-gege/dsh-agent-shell`** 填进去了，这一步通常**不用再做**，
-只在换用户/组织名时才需要复查一遍：
+* **宿主半（`lib/index.js` / `lib/tmux.js`）改代码**：必须重启 `dsh web`。实测确认，
+  改配置能生效、改代码不生效 —— 连换入口文件名都没用（解析出的 URL 不变）。
+* **客户端半（`lib/client.js`）改代码**：**热重载**。宿主会监视客户端产物并重新哈希，
+  实测同步文件后 entry 的 `rev` 随即变化（`b9b89a09…` → `d0aa09b0…`），刷新页面即可看到。
+* **首次安装**：需要重启一次 —— `dsh.client` 的扫描发生在宿主启动时。
 
-```sh
-grep -rn "OWNER\|<你的用户名>" . --include="*.md" --include="*.yml"   # 应当只剩 PUBLISHING.md 自己
-```
 
-已经就位的位置：
+## 使用：面板（人）
 
-* `README.md` / `README.en.md` 顶部的 **CI 徽章**（指向 `github.com/Mrtime-gege/...`）；
-* `.github/ISSUE_TEMPLATE/config.yml` 里的 Discussions 与私有漏洞报告链接；
-* `package.json` 的 `author` / `repository` / `homepage` / `bugs`
-  —— 用的是 GitHub 的 **noreply 邮箱**（`<数字ID>+<用户名>@users.noreply.github.com`），
-  不把真实邮箱写进公开的包元数据与提交历史。数字 ID 可以用
-  `curl -s https://api.github.com/users/<用户名> | grep '"id"'` 取到（本项目是 `327958341`）；
-* `LICENSE` 的版权行 `Copyright (c) 2026 Mrtime-gege`
-  （MIT 保留年份与版权人即可，改这一行不影响其余条款）。
+右下角胶囊点开。要点：
 
-改完 `npm run release:check` 再跑一次，然后提交：
+* **锁**：默认锁死，输入框禁用并显示「输入已锁定」。点锁图标解锁后才能输入；
+  **焦点离开面板会自动重新上锁**，避免误触把内容打进正在跑的 shell。
+* **缩放**：面板四边四角共 **8 个缩放手柄**（把鼠标放到边缘即可，右下角有小斜线提示），
+  最小 360×220，夹在视口内。**一旦拖动或缩放，面板就完全由自己的矩形决定、不再跟随胶囊** ——
+  否则调好的位置会在下次拖胶囊时被打乱。位置与尺寸都存 localStorage，跨刷新保留。
+* **重命名 shell**：选择器每行的 `✎`。回车确认、`Esc` 取消、失焦取消；
+  名字会自动净化（只留字母数字下划线连字符）并补上 `dsh-` 前缀 ——
+  **tmux 会偷偷把 `.` 和 `:` 换成 `_`**，不先净化的话 UI 显示的名字和真实名字就对不上，
+  之后按名字操作会找不到会话。重名会被拒绝。
 
-```sh
-git add -A && git commit -m "chore: 填上仓库地址与作者元数据"
-```
+* **切换 shell**：`‹` `›` 挨个切；**shell 很多时点中间的名字（带 ▾）打开选择器** ——
+  列出全部 shell，每行带状态点（绿＝停在提示符，琥珀＝有东西在跑）、尺寸、前台命令、
+  缓冲用量，点击直接跳过去；行尾悬停出现 `✎`/`✕`；底部一行 `＋ 新建 shell`。
+  于是「100 个 shell 从 1 跳到 50」是两次点击，而不是 50 次。
+  内部按**名字**而非下标记录当前项：改名或增删都会让列表重排，下标一旦错位面板就会跳错 shell。
+* **主动推送**：输入框最右侧的 `⤒` 按钮。这套模型下输入框**本应始终为空**，一旦出现残留
+  （自动提交漏了一次），点它就把残留内容送进终端。**检测到残留时按钮会变成琥珀色**提醒你。
+  锁定时该按钮禁用 —— 它的作用正是「往终端里送东西」，与锁的语义冲突。
+* **输入框**：**真·终端模型，没有任何本地缓冲** —— 每个按键都直接送进 shell，
+  于是补全、历史、行内光标、`Ctrl-R` 全部由 shell 自己的 readline 处理，行为与真终端一致。
 
-### 3.3 打标签（tag 是「发布」的扳机）
+  | 键 | 行为 |
+  |---|---|
+  | 可打印字符 | 交给浏览器/输入法写入 → 由 `input` 事件交付给终端 |
+  | `Enter` | 回车 |
+  | `Tab` / `Shift+Tab` | 补全 / 反向补全 |
+  | `↑` `↓` | 历史上下条 |
+  | `←` `→` `Home` `End` `Delete` | 行内移动与删除 |
+  | `Backspace` | 删字符 |
+  | `Ctrl-R` | 反向搜索历史 |
+  | `Ctrl-A/E/B/F/K/U/Y/P` | readline 行内操作 |
+  | `Ctrl-C/D/L/Z` | 中断 / EOF / 清屏 / 挂起 |
+  | `Esc` | 送给终端（例如退出选单） |
 
-```sh
-git tag -a v0.1.0 -m "dsh-agent-shell 0.1.0"
-git push origin v0.1.0
-```
+  * `Ctrl+V` `Ctrl+X` 等**放行给浏览器**（粘贴/剪切），不抢；
+  * 有选中文本时 `Ctrl+C` 也让浏览器复制，不会误发 `SIGINT` 打断正在跑的命令；
+  * 粘贴走 `onPaste`，直接送剪贴板文本并**保留换行**（多行粘贴＝逐行执行，与真终端一致）。
 
-tag 名必须是 **`v<package.json 里的 version>`**：`release.yml` 会校验两者一致，不一致直接失败 ——
-这样能挡住「tag 打了 v0.2.0 但包还是 0.1.0」这种最常见的事故。
+  #### 输入法（IME）：为什么可打印字符**不能**在 keydown 里拦
 
-打了 tag 会触发 GitHub Actions 的发布工作流：它跑检查 → `npm publish --provenance` →
-用对应版本的 CHANGELOG 段落创建 GitHub Release。
-**这需要先在仓库里配置 `NPM_TOKEN`**（见 4.1）；没配的话工作流会失败，但 tag 本身没坏，
-按 [4.2 本地发布](#42-手工发布本地-npm-publish) 补发即可。
+  这是这套输入模型最容易写错的地方。**中文/日文输入法的组字，依赖浏览器对按键的默认处理** ——
+  如果在 keydown 里对每个字母都 `preventDefault()` 并直接发送，IME 可能根本收不到那次按键、
+  组字起不来。所以这里的规则是：
 
----
+  * **可打印字符一律不拦**，交给浏览器与输入法，再由 `input` 事件交付给终端；
+  * **组字中间态一律放行、且不发送** —— 否则 `n` `ni` `nih` 会被逐个送进终端，
+    而不是等 `你好` 提交后整段送出；
+  * 组字中的 `Enter`/空格/`Tab`/方向键都是在给输入法选词，**一个都不能抢**；
+  * 提交后读走输入框内容并立即清空，让它始终只是「按键捕获面」。
 
-## 4. 发布到 npm
+  #### 组字状态必须**自己维护**，不能信事件的 `isComposing`
 
-有两条路：CI 自动发（推荐，带 provenance）和本地手工发（第一次最直观）。
-**任选一条**，不要对同一个版本两条都跑（会撞 `E403: cannot publish over existing version`）。
+  这是第二个必须踩过才会信的坑。**Chrome 在组字提交时补的那个 `input` 事件里，
+  `isComposing` 常常仍是 `true`**（已知的浏览器不一致），而且各浏览器的事件顺序也不同：
 
-### 4.1 路线 A：Trusted Publisher / OIDC —— **本仓库已配置，默认路线**
+  ```
+  Chrome 常见： compositionstart → input(正文, isComposing=true) → compositionend
+  Safari 常见： compositionstart → compositionend(正文已在) → input(isComposing=false)
+  实测还遇到过： compositionstart → compositionend(此刻值为空!) → input(正文, isComposing=true)
+  ```
 
-**推一个 tag 就完事了**，CI 用 OIDC 身份发布，仓库里**不需要任何长期密钥**（没有
-`NPM_TOKEN` 可泄漏），并且**自动带 provenance 签名**。
+  只按事件字段判断，第三种顺序就会漏掉整次提交 —— 症状很具体：**提交的汉字滞留在输入框里，
+  直到敲下一个字符（比如数字）才和后面的字一起被送走**。
 
-本仓库当前状态（2026-09 配置）：
+  所以改成 `compositionend` 置位/清位、`input` **只看自己维护的标志**，并叠加两条保险：
 
-```
-package: dsh-agent-shell
-type: github   file: release.yml   repository: Mrtime-gege/dsh-agent-shell
-permissions: publish, stage publish
-id: 075d17aa-972e-4d5e-a421-8d7fda9ce481
-```
+  * 事件明确说 `isComposing === false` 时以它为准清标志（防 `compositionend` 缺席导致标志卡死）；
+  * 非组字的 `keydown` 顺手清标志；
+  * 另挂一个**原生** `compositionend` 监听兜底（React 的合成 composition 事件并非处处可靠）。
 
-本仓库**没有**配 `NPM_TOKEN` secret —— 这正是信任发布生效的证明（工作流会打印
-「未配置 NPM_TOKEN，改走 Trusted Publisher（OIDC）发布」）。所以：**不要**为了「图省事」
-再手工 `npm publish` 一个已经推过 tag 的版本，那样会绕过签名。
+  `compositionend` 与 `input` 共用同一套「读走 → 清空 → 发送」，**谁先读到谁生效**，
+  因此上面三种顺序都只发一次。
 
-配置命令（npm ≥ 11.6 提供 `npm trust`，一次配置长期有效，需要一次 2FA 授权）：
+  `decideKey()` / `decideComposition()` 是两个**纯函数**，承载全部上述判断，并作为
+  `__decideKey` / `__decideComposition` 暴露出来供离线断言 —— 输入法没法在无 DOM 的环境里
+  真跑，只能靠纯函数的单元测试覆盖分支与事件顺序（见[开发与验证](#开发与验证)）。
 
-```sh
-npm trust github dsh-agent-shell \
-  --file release.yml \
-  --repo Mrtime-gege/dsh-agent-shell \
-  --allow-publish
+  > 代价：每次按键是一次 HTTP 往返（已用队列串行化，顺序不会乱），并且屏幕靠轮询更新，
+  > 所以每次发送后会额外触发一次**立即刷新**（去抖到约 14 次/秒）—— 否则自己打的字要等到
+  > 下一次轮询才看得见，手感会很差。
 
-npm trust list dsh-agent-shell          # 查看现有信任关系
-npm trust revoke dsh-agent-shell --id=<trust-id>   # 撤销
-```
+  > **锁**的意义在这里变得更重要：每一个按键都会直接进终端，所以默认锁死、且**焦点离开面板
+  > 自动重新上锁**，避免误触往正在跑的 shell 里灌字符。
 
-> 为什么值得切过来：`release.yml` 的 OIDC 步骤会先写一份**干净的 userconfig**（只留 registry，
-> 不出现任何 `_authToken` 行）—— `actions/setup-node` 生成的 `_authToken=${NODE_AUTH_TOKEN}`
-> 占位符会让 npm 以为要用 token 认证，那是 OIDC 发布最常见的坑。
+* **`＋`** 新建 shell，**`✕`** 关闭当前 shell，**`—`** 收起。
+  `✕` 与 `—` 之间有一条分隔线，且 **`✕` 需要点两次**（第一次变成红色「确认关闭」，3 秒内再点一次才
+  真的关，否则自动复位）—— 因为「收起」是可撤销的、「关闭」会连同里面的进程一起结束，两者挨在一起
+  一步执行迟早会误触。
+* **拖动**：胶囊可拖动（位置存 localStorage）；面板标题栏同样可拖，拖动整体平移。
+  位移 ≤4px 算点击、超过算拖动，拖动后紧跟的那次 click 会被吞掉，不会误展开。
+* **看历史**：屏幕区默认取**可见屏 + 向上 200 行**，可滚动。指标行里的
+  **`⤒ 更多历史`** 每点一次把取景窗口翻倍（200 → 400 → … → 上限 5000 行）；
+  往上翻之后会出现 **`⤓ 回到最新`** 一键回底。
+* **滚动规则**：**贴着底部就自动跟随新输出；翻上去就保持你正在读的位置不动**。
+  这里有个容易踩的坑：取景窗口是「最后 N 行」，新输出会把**最上面**的行挤掉，
+  所以「scrollTop 没变」并不等于「阅读位置没变」——只把滚动条冻住的话，
+  你正在读的那几行仍会被顶上去。插件的做法是按**内容整体位移了几行**补偿滚动位置
+  （窗口下滑 K 行就补 K 行高度；点「更多历史」在顶部插入 P 行则反向补 P 行），
+  判不准（内容被整屏换掉、整屏都是重复行）时宁可不补偿也不乱跳。
+  判定逻辑是纯函数 `scrollAnchor()`，离线可复现：`scripts/test-client.mjs` 覆盖了
+  纯追加、顶部被挤掉、窗口翻倍、内容被换掉、贴底容差、边界夹取等情形。
+* 指标行：名称、尺寸、前台进程、**缓冲 已用/上限 行数**、**已用字节**、是否有人接入、
+  **取景窗口**、起始目录、**插件版本**（`v0.1.0 · c11`，报障时直接报这行）。
 
-### 4.2 路线 B：手工发布（本地 `npm publish`，仅在 CI 不可用时兜底）
 
-本账号是**写入强制 2FA**，所以本地发布会弹一次浏览器授权（npm 会打印一个
-`https://www.npmjs.com/auth/cli/<id>` 链接）。0.1.0 / 0.1.1 都是这样发的 ——
-代价是**没有 provenance 签名**，所以现在只当作兜底路径。
+## 什么时候才该用持久化 shell
 
-```sh
-npm login            # 浏览器/OTP 流程；npm 12 默认走 web 登录
-npm whoami           # 必须打印出你的用户名，否则后面必然 401
+本插件给模型的建议（**同时写进了工具描述与系统提示**，不是只写在文档里）：
 
-npm run release:check    # 最后一次自检
-npm publish              # package.json 里 publishConfig.access=public，不用再加 --access
+| 用常规命令行/文件工具 | 用本插件的 `shell_*` |
+|---|---|
+| 一次性命令、读文件、搜索、跑测试、装依赖 | 需要**真交互式 TTY**：`sudo`/`ssh` 密码提示、`vim`、REPL、TUI 程序 |
+| 输出一次就够、不需要回头再看 | 需要**跨调用/跨对话保活**：长构建、常驻服务，稍后还要回来看或让它继续跑 |
+| 结果能一次拿完 | **用户明确要求**用持久化 shell |
 
-# 预发布则用：npm publish --tag next
-```
+另外两条明确要求：**不要为一条一次性命令就开 shell**；**用完关掉**（`shell_close`），
+别把空闲 shell 留着占资源。
 
-发布成功后会打印 `+ dsh-agent-shell@0.1.0`。
+实现位置：
+* 工具描述：`shell_open` / `shell_send` / `shell_close` / `shell_list` 的 description 里都写了适用范围；
+* 系统提示：注册为 `agent-shell:usage` 段落（order 118，紧跟 approval 策略之后），
+  其中还如实说明「不经过官方审批、护栏只是减速带」。系统提示服务不存在时自动跳过，
+  插件照常工作（可选依赖）。
 
-### 4.3 发布后立刻验证（不要只看「成功」两个字）
+## 使用：工具（AI）
 
-```sh
-V=0.1.3
-npm view dsh-agent-shell version                  # 期望就是 $V
-npm view dsh-agent-shell dist-tags                # latest 指向 $V（预发布则看 next）
-npm view dsh-agent-shell files --json             # 期望看到 lib/ 与 cordis.patch.yml
-
-# OIDC 发布的**关键证据**：必须有 attestations（手工发布是「无」）
-npm view dsh-agent-shell@$V dist.attestations --json
-npm audit signatures                              # 本地校验签名链
-
-mkdir -p /tmp/pkgcheck && cd /tmp/pkgcheck
-npm pack dsh-agent-shell@$V && tar -tzf dsh-agent-shell-$V.tgz | head -20
-```
-
-**一条命令分辨「这次是谁发的」**：`dist.attestations` 为「有」= CI 通过 Trusted Publisher
-发的（带 provenance）；为「无」= 有人手工发的。发版后顺手看一眼，等于确认自动化没有退化成手工。
-
-最后做一次**真实安装**验证（这是唯一能证明 patch 与客户端产物都在包里的办法）：
-
-```sh
-dsh plugin --profile web add dsh-agent-shell@0.1.0
-# 重启 dsh web，确认：右下角出现胶囊；面板指标行显示 v0.1.0
-```
-
-### 4.4 Trusted Publisher 也可以从网页配（等价做法）
-
-命令行不方便时，用网页等价操作：npm 包页面 → **Settings → Trusted Publisher** → 选
-**GitHub Actions** → 填组织/用户名、仓库名 `dsh-agent-shell`、workflow 文件名 `release.yml`
-→ 保存。两种方式改的是同一份配置。
-
-> 两处必须一致：**workflow 文件名**（`release.yml`）与**仓库全名**（`Mrtime-gege/dsh-agent-shell`）。
-> 名字对不上时 CI 会以 `403`/`404` 失败，报错不会点名是这里配错了 —— 而路线 B 的手工发布
-> 完全不受影响，所以这种错很容易被误判成「npm 抽风」。改过工作流文件名的话，记得同步这里。
-
----
-
-## 5. 每个版本的发布清单
-
-**现在只有「推 tag」这一步是必须人工触发的**，其余全自动。日常改动写进 CHANGELOG 的
-`## 未发布` 一节与 README 的「更新与修复记录」；发版时把它变成版本号：
-
-```sh
-V=0.1.4
-# 1. 改代码 → 日常自查
-npm run check && npm run release:check
-
-# 2. 定版本：三处必须同步（package.json / CHANGELOG.md / lib/client.js 的 PKG_VERSION）
-#    release:check 会机械校验这三者一致，漏了会直接 fail
-npm version "$V" --no-git-tag-version
-sed -i "s/const PKG_VERSION = '[^']*'/const PKG_VERSION = '$V'/" lib/client.js
-$EDITOR CHANGELOG.md             # 「## 未发布」→「## $V — 标题」
-$EDITOR README.md                # 「### 未发布（下一个版本）」→「### $V — 标题」
-npm run release:check            # 必须通过
-
-# 3. 提交并推送
-git add -A && git commit -m "release: $V" && git push
-
-# 4. 打 tag 并推送 —— 这一条命令就是「发布」的扳机
-git tag -a "v$V" -m "$V" && git push origin "v$V"
-
-# 5. 验证（等 CI 跑完，绿灯即已发布）
-npm view "dsh-agent-shell@$V" dist.attestations --json   # 期望：有
-```
-
-> 工作流是**幂等**的：同一个 tag 重跑、或某个版本恰好在 npm 上已存在时，它会跳过发布，
-> 只补建 GitHub Release。所以「重推 tag」是安全的补救手段，而**不是**重发版本。
-
----
-
-## 6. 出问题怎么办（回滚与补救）
-
-| 情况 | 做法 | 注意 |
+| 工具 | 参数（★ = required） | 作用 |
 |---|---|---|
-| 刚发的版本有 bug | **发一个 patch**（`0.1.1`），这是最正常的路径 | 用户会按 semver 自动升级到它 |
-| 严重问题，必须撤下 | `npm unpublish dsh-agent-shell@0.1.0` | **72 小时内**才允许，且**同一版本号再也发不了**；有依赖者会直接装不上，慎用 |
-| 想劝退但保留可安装 | `npm deprecate dsh-agent-shell@0.1.0 "严重 bug，请升到 0.1.1"` | 首选，代价最小 |
-| `latest` 指错了版本 | `npm dist-tag add dsh-agent-shell@0.1.1 latest` | 只动标签，不动包内容 |
-| tag 打错了 | `git push --delete origin v0.1.0 && git tag -d v0.1.0` | 若 CI 已经发布成功，删 tag 不能让 npm 回滚 |
-| GitHub Release 有误 | `gh release delete v0.1.0` | 与 npm 无关 |
-| 包内容缺文件 | 修 `files` 白名单 → 升 patch → 重新发布 | 已发布的版本无法原地修改 |
+| `shell_open` | `name?` `cols?` `rows?` `cwd?` | 新建后台 shell，返回首屏（`cwd` 不存在会明确报错，不会静默换目录） |
+| `shell_send` | ★`session` `text?` `preKeys?` `keys?` `confirm?` `settleMs?` | 像人一样输入：`preKeys` → `text` → `keys`，一次调用可完成「进插入模式→打字→退出」 |
+| `shell_read` | ★`session` | 读当前可见屏 |
+| `shell_history` | ★`session` `lines?` | 读滚动缓冲（滚出屏幕的输出） |
+| `shell_list` | — | 列出全部 shell 与指标 |
+| `shell_resize` | ★`session` ★`cols` ★`rows` | 改尺寸 |
+| `shell_rename` | ★`session` ★`newName` | 重命名 shell（自动净化名字并补 `dsh-` 前缀） |
+| `shell_close` | ★`session` | 关闭（**幂等**：已经没了也返回成功，并说明没关到） |
+| `shell_diagnose` | — | 服务端 / 看门狗 / 起始目录状态 |
 
-### 常见报错对照
+`shell_send` 的 `preKeys` / `keys` 收的是 tmux 键名（`Escape`、`C-c`、`Enter`、`Up`…），
+`text` 是**原样输入**（不做任何解释）。所以「进 vim 插入模式 → 打字 → 保存退出」是一次调用：
 
-| 报错 | 原因 | 处理 |
-|---|---|---|
-| `E401 Unauthorized` / `ENEEDAUTH` | 没登录或 token 失效 | `npm login` / `npm whoami` |
-| `E403 cannot publish over existing version` | 该版本号已存在 | 升版本号，**不要**重复发同一版本 |
-| `E403 ... 2FA` | 没提供 OTP | 交互式发布，或用带 `--otp=123456` / automation token |
-| `E402 Payment Required` | registry 配成了私有源 | `npm config get registry` 应为 `https://registry.npmjs.org/` |
-| `EPUBLISHCONFLICT` | 包名被别人占了 | `npm view dsh-agent-shell` 确认 |
-| `E422` / `EOTP` | 2FA / OTP 相关 | 检查账号 2FA 设置 |
-| CI 里 `npm publish` 401 | `NPM_TOKEN` 没配或过期 | 重新生成 granular token；或改用 Trusted Publisher |
-| 启动报 `duplicate loader entry id: agent-shell` | 同时用了 bundle 和手工 patch 行 | 见 `docs/使用细节.md`「两条路只能选一条」 |
+```jsonc
+shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "keys": ["Escape"] }
+```
 
----
 
-## 7. 关于「第一次发布」的特别提醒
+## HTTP API
 
-* **第一次发布不可逆的只有包名**：`dsh-agent-shell` 一旦发布就是你的（同名后来者无法发布）。
-  版本号可以不断加，所以**不要**为了「完美」推迟——0.1.0 有瑕疵，发 0.1.1 就好。
-* **先发 GitHub、再发 npm**：npm 页面需要仓库地址才有意义，而仓库先建好还能让 CI 路线一次跑通。
-* **元数据可以后补**：`author` / `repository` 缺失只是 npm 页面难看，不影响安装；
-  补完之后升一个 patch 版本即可生效（npm 页面上的元数据以最新版本为准）。
-* **发布前最后一道人工检查**：`git status` 干净、`npm pack --dry-run` 的文件清单符合预期、
-  `CHANGELOG.md` 读起来像人写的（用户就是靠它决定要不要升级）。
+面板用它，你也可以用（同源、`127.0.0.1`，**无独立鉴权**，见[安全说明](#安全说明)）：
+
+```
+GET  /plugins/shell/list                     会话列表 + 服务端信息
+GET  /plugins/shell/screen?name=&lines=      当前屏 + 该会话指标
+POST /plugins/shell/keys                     {name, text?, preKeys?, keys?, confirm?}
+POST /plugins/shell/new                      {name?, cols?, rows?, cwd?}
+POST /plugins/shell/kill                     {name}
+POST /plugins/shell/resize                   {name, cols, rows}
+POST /plugins/shell/rename                   {name, to}
+GET  /plugins/shell/diagnose
+```
