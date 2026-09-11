@@ -149,8 +149,18 @@ const webServer = {
   register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) },
 }
 const effect = (cb) => cb()
+// 假 userQuestions：确认门的真实契约（ask({questions,agent}) → {answers:[{id,selected}]}）。
+// 冒烟要覆盖「打包产物里确认门真的会问一次」，所以桩必须提供它。
+const consentAsks = []
+const userQuestions = {
+  ask: async (request) => {
+    consentAsks.push(request)
+    const id = request?.questions?.[0]?.id ?? 'unknown'
+    return { answers: [{ id, selected: ['允许本对话使用（授权执行任意命令）'] }] }
+  },
+}
 const ctx = {
-  get: (name) => ({ subprocess, timer })[name],
+  get: (name) => ({ subprocess, timer, userQuestions })[name],
   effect,
   on: () => () => {},
   logger: console,
@@ -183,10 +193,12 @@ const call = async (path, method, body) => {
   let parsed; try { parsed = JSON.parse(res._body) } catch { parsed = res._body }
   return { code: res._code, body: parsed }
 }
+// 真实工具管线一定带调用方 agent；确认门与归属都依赖它，冒烟桩必须一样。
+const SMOKE_EXEC = { agent: { session: { id: 'smoke-conversation' } } }
 const run = async (name, args) => {
   const tool = tools.get(name)
   if (tool === undefined) throw new Error(`工具不存在：${name}`)
-  const value = await tool.execute(args, {})
+  const value = await tool.execute(args, SMOKE_EXEC)
   return typeof value === 'string' ? value : JSON.stringify(value)
 }
 
@@ -196,10 +208,26 @@ const mod = await import(join(pkgDir, 'lib', 'index.js'))
 console.log(`导出：${Object.keys(mod).sort().join(', ')}\n`)
 check(mod.name === 'dsh-agent-shell', `插件名 = ${mod.name}`)
 
-mod.apply(ctx, { socket: SOCKET, httpBase: BASE, watchdog: true, exposeHttp: true, exposeTools: true, extendedKeys: true })
+// 审计/授权/归属一律落到临时目录：测试跑出来的记录**绝不**能进用户的真实目录
+// （实测踩到过：上一次冒烟把 smoke-conversation 的授权写进 ~/.dsh/agent-shell/consent.json，
+//  下一次冒烟直接"已授权"、确认门整条路径等于没测）。
+mod.apply(ctx, {
+  socket: SOCKET, httpBase: BASE, watchdog: true, exposeHttp: true, exposeTools: true,
+  extendedKeys: true, auditDir: join(root, 'audit'),
+})
 
-check(tools.size === 10, `注册工具数 = ${tools.size}（期望 9）`)
-check(routes.size === 9, `注册 HTTP 路由数 = ${routes.size}（期望 8）`)
+check(tools.size === 10, `注册工具数 = ${tools.size}（期望 10）`)
+check(routes.size === 9, `注册 HTTP 路由数 = ${routes.size}（期望 9）`)
+
+// 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
+{
+  const scriptPath = join(pkgDir, 'install-deps.sh')
+  check(existsSync(scriptPath), 'install-deps.sh 在发布产物里')
+  const probe = execFileSync('bash', [scriptPath, '--check'], { encoding: 'utf8' })
+  check(probe.includes('tmux'), `--check 报告 tmux 状态：${(probe.split('\n').find((l) => l.includes('tmux')) ?? '').trim()}`)
+  check(probe.includes('[ok]') || probe.includes('[missing]'), '输出用 [ok]/[missing] 标注（人读得懂，AI 也好解析）')
+  check(probe.includes('结论：'), `给出明确结论：${probe.split('\n').filter((l) => l.startsWith('结论')).join(' ')}`)
+}
 
 await new Promise(r => setTimeout(r, 300))
 const conf = readFileSync(`/tmp/${SOCKET}-tmux.conf`, 'utf8')
@@ -321,6 +349,14 @@ check(tmuxSrc.includes('miss=$((miss+1))') && tmuxSrc.includes('-lt 3'), '存活
 
 const empty = await call('/list', 'GET')
 check(empty.body?.sessions?.length === 0, `收尾：剩 ${empty.body?.sessions?.length} 个会话`)
+
+// 4.4 首次使用确认门（打包产物里必须真的生效）
+{
+  check(consentAsks.length >= 1, `首次调用工具时问了用户一次（${consentAsks.length} 次）`)
+  const q = consentAsks[0]?.questions?.[0]
+  check(q !== undefined && String(q.detail ?? '').includes('任意命令'), '确认问题写明「授权执行任意命令」')
+  check(consentAsks.length === 1, `同对话后续调用不再重复询问（共 ${consentAsks.length} 次）`)
+}
 
 console.log(problems.length === 0
   ? '\n冒烟测试通过：打包产物可加载、可注册、可驱动真实 tmux。'

@@ -401,13 +401,24 @@ notes.push('安全告知内容（AI 开发 / 无审批 / 护栏非防护）均�
   const abs = join(ROOT, 'README.md')
   if (existsSync(abs)) {
     const body = readFileSync(abs, 'utf8')
-    if (!body.includes('## 更新与修复记录')) {
-      fail('README.md 缺少「## 更新与修复记录」章节（改动记录要在门面上）')
+    if (!body.includes('## 最近更新')) {
+      fail('README.md 缺少「## 最近更新」章节（README 只留最近一次更新，历史在 docs/更新记录.md）')
     } else if (!body.includes(version)) {
-      fail(`README.md 的改动记录里没有当前版本 ${version}（发版时 README 不能落后于 CHANGELOG）`)
+      fail(`README.md 的「最近更新」里没有当前版本 ${version}（发版时 README 不能落后于 CHANGELOG）`)
     } else {
-      notes.push(`README.md 带着改动记录，且已跟上版本 ${version}`)
+      notes.push(`README.md 带着最近一次更新，且已跟上版本 ${version}`)
     }
+  }
+  // 完整记录在 docs/更新记录.md：它必须存在，且同样跟上当前版本 ——
+  // 否则"README 只留最近一次"会让历史悄悄断档。
+  const historyRel = 'docs/更新记录.md'
+  const historyAbs = join(ROOT, historyRel)
+  if (!existsSync(historyAbs)) {
+    fail(`缺少 ${historyRel}（完整更新与修复记录；README 只保留最近一次）`)
+  } else if (!readFileSync(historyAbs, 'utf8').includes(version)) {
+    fail(`${historyRel} 里没有当前版本 ${version}`)
+  } else {
+    notes.push(`${historyRel} 存在且已跟上版本 ${version}`)
   }
 }
 

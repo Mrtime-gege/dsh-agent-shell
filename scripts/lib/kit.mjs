@@ -116,6 +116,25 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
       }
     : undefined
 
+  // 假 userQuestions：确认真实契约（ask({questions, agent, signal}) → {answers:[{id, selected}]}）。
+  // 默认「允许」，用 __consentAnswer / __consentMode 覆盖（'denied' / 'unavailable'）。
+  const consentDirectory = { asks: [] }
+  const userQuestions = config.__consentMode === 'unavailable'
+    ? undefined
+    : {
+        ask: async (request) => {
+          consentDirectory.asks.push(request)
+          if (config.__consentMode === 'delegated') {
+            const error = new Error('DELEGATED_CALLER: the caller is owned by another agent')
+            error.code = 'DELEGATED_CALLER'
+            throw error
+          }
+          const id = request?.questions?.[0]?.id ?? 'unknown'
+          const wanted = config.__consentAnswer === 'denied' ? '不允许' : '允许本对话使用（授权执行任意命令）'
+          return { answers: [{ id, selected: [wanted] }] }
+        },
+      }
+
   let settingsHooks = null
   const settings = config.__withSettings === true
     ? {
@@ -143,7 +162,7 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   const services = { subprocess, timer }
   if (settings !== undefined) services.settings = settings
   const ctx = {
-    get: (name) => ({ subprocess, timer, settings, systemPrompt })[name],
+    get: (name) => ({ subprocess, timer, settings, systemPrompt, userQuestions })[name],
     effect,
     on: () => () => {},
     logger: { log: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')) },
@@ -168,7 +187,7 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
 
   // 第三个参数是「执行上下文」：真实运行时由工具管线注入，里面有调用方 agent ——
   // 归属（D1）与审计的 actor 都来自它，所以测试必须能模拟它，否则那条路径等于没测。
-  const run = async (name, args, exec = {}) => {
+  const run = async (name, args, exec = { agent: { session: { id: String(config.__actor ?? 'test-session') } } }) => {
     const tool = tools.get(name)
     if (tool === undefined) throw new Error(`工具不存在：${name}`)
     const value = await tool.execute(args ?? {}, exec)
@@ -242,7 +261,7 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
 
   return { pkgDir, tools, routes, run, call, driver, tmux, cleanup, logs, subprocess, timer,
     settings, settingsRegistrations, changeSettings, reloadConfig: () => config,
-    systemPromptContexts, mod }
+    systemPromptContexts, mod, consent: consentDirectory }
 }
 
 /** 断言器：收集失败而不是立刻抛出，跑完一次性汇报。 */

@@ -19,6 +19,7 @@
 
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const outputSizeOf = (p) => { try { return statSync(p).size } catch { return 0 } }
 import { makeHarness, makeChecker, resolvePeers, packIntoTemp, skipOrFail } from './lib/kit.mjs'
@@ -546,6 +547,115 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(String(injList.socketNote).includes('收敛') && String(injList.socketNote).includes('bad;name'),
     `面板如实报告原值：${injList.socketNote}`)
   h3.cleanup()
+}
+
+/* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */
+
+{
+  // 用**全新** harness：主 harness 在更早的小节里已经授权过，那不是"第一次"
+  const hFirst = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-first`,
+    config: { watchdog: false, __actor: 'first-run-conversation' },
+  })
+  const first = hFirst
+  const h = first                     // 本节以下都用这个新 harness 的 run/call
+  const { run, call } = hFirst
+
+  // 1) 第一次用 → 恰好问一次，且问题必须说清"授权的是任意命令"
+  const before = h.consent.asks.length
+  const opened = await run('shell_open', { name: 'consent-a' })
+  check(String(opened).includes('session dsh-consent-a'), `确认后正常开会话：${String(opened).split('\n')[0]}`)
+  check(h.consent.asks.length === before + 1, `第一次调用恰好问了一次（${h.consent.asks.length - before} 次）`)
+  const asked = h.consent.asks[h.consent.asks.length - 1]
+  const q = asked.questions[0]
+  check(q.question.includes('允许') && String(q.detail).includes('任意命令'),
+    '问题里明确写了「授权执行任意命令」，不是含糊的"是否继续"')
+  check(Array.isArray(q.options) && q.options.some((o) => o.label.includes('允许')) && q.options.some((o) => o.label.includes('不允许')),
+    `给了明确的允许/不允许两个选项：${q.options.map((o) => o.label).join(' / ')}`)
+  check(asked.agent !== undefined, '提问带上了发起 agent（DSH 用它判断能不能向人类提问）')
+
+  // 2) 同一个对话再用 → 不再问（否则会烦到用户，等于没做门）
+  await run('shell_send', { session: 'dsh-consent-a', text: 'echo ok', keys: ['Enter'] })
+  await run('shell_open', { name: 'consent-a2' })
+  check(h.consent.asks.length === before + 1, `同对话后续调用不再询问（仍是 ${h.consent.asks.length - before} 次）`)
+
+  // 3) 面板是人自己操作：不问他"允不允许自己"，但要留痕
+  const panelBefore = h.consent.asks.length
+  const panelKeys = await call('/keys', 'POST', { name: 'dsh-consent-a', text: 'echo human', keys: ['Enter'] })
+  check(panelKeys.code === 200 && h.consent.asks.length === panelBefore, '面板（人）路径不过门、也不产生提问')
+  await run('shell_close', { session: 'dsh-consent-a' })
+  await run('shell_close', { session: 'dsh-consent-a2' })
+
+  // 4) **拒绝**必须真的挡住：不能只是回一句话，shell 也不许建出来
+  const hDeny = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-deny`,
+    config: { watchdog: false, __consentAnswer: 'denied' },
+  })
+  const denied = await hDeny.run('shell_open', { name: 'denied-shell' }).then(() => null).catch((e) => e)
+  check(denied !== null && String(denied.message).includes('拒绝'),
+    `拒绝后调用被挡下并给出可转述的说明：${String(denied?.message).slice(0, 60)}`)
+  const afterDeny = (await hDeny.call('/list', 'GET')).body.sessions.map((x) => x.name)
+  check(!afterDeny.includes('dsh-denied-shell'), `被拒绝时**没有**创建 shell（现有：${afterDeny.join(',') || '无'}）`)
+  hDeny.cleanup()
+
+  // 5) 子代理（没有人可以问）→ 未授权时明确拒绝；有人类授权过则继承并如实记录
+  const hDeleg = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-deleg`,
+    config: { watchdog: false, __consentMode: 'delegated' },
+  })
+  const delegErr = await hDeleg.run('shell_open', { name: 'deleg-shell' }).then(() => null).catch((e) => e)
+  check(delegErr !== null && String(delegErr.message).includes('子代理') && String(delegErr.message).includes('主对话'),
+    `子代理且无人授权时拒绝，并说清该怎么办：${String(delegErr?.message).slice(0, 70)}`)
+  hDeleg.cleanup()
+
+  // 6) 服务不可用 → **fail closed**（问不到人就不算得到授权），而不是默认放行
+  const hNoAsk = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-noask`,
+    config: { watchdog: false, __consentMode: 'unavailable' },
+  })
+  const noAskErr = await hNoAsk.run('shell_open', { name: 'noask-shell' }).then(() => null).catch((e) => e)
+  check(noAskErr !== null && String(noAskErr.message).includes('requireConsent'),
+    `没有提问服务时拒绝，并指出配置项出口：${String(noAskErr?.message).slice(0, 70)}`)
+  hNoAsk.cleanup()
+
+  // 7) 配置里明确关掉 → 不再询问（这是用户的显式决定，不是我们悄悄放行）
+  const hOff = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-consentoff`,
+    config: { watchdog: false, requireConsent: false },
+  })
+  const offOpened = await hOff.run('shell_open', { name: 'off-shell' })
+  check(String(offOpened).includes('session dsh-off-shell') && hOff.consent.asks.length === 0,
+    'requireConsent=false 时不提问（但要用户自己显式关）')
+  await hOff.run('shell_close', { session: 'dsh-off-shell' })
+  hOff.cleanup()
+
+  // 8) 授权要落盘：换一个新 harness（相同审计目录）不该再问一次 —— 热重载/重启后同理
+  const sharedDir = join(tmpdir(), 'dsh-consent-shared-' + String(process.pid))
+  const hShared1 = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-share1`, config: { watchdog: false, auditDir: sharedDir, __actor: 'shared-session' },
+  })
+  await hShared1.run('shell_open', { name: 'shared-a' })
+  const asksAfterFirst = hShared1.consent.asks.length
+  const hShared2 = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-share2`, config: { watchdog: false, auditDir: sharedDir, __actor: 'shared-session' },
+  })
+  await hShared2.run('shell_open', { name: 'shared-b' })
+  check(asksAfterFirst === 1 && hShared2.consent.asks.length === 0,
+    `授权落盘后新实例不再重复问（第一个 harness 问了 ${asksAfterFirst} 次，第二个 ${hShared2.consent.asks.length} 次）`)
+  await hShared1.run('shell_close', { session: 'dsh-shared-a' })
+  await hShared2.run('shell_close', { session: 'dsh-shared-b' })
+  hShared1.cleanup(); hShared2.cleanup()
+
+  // 9) 授权决策本身要进审计（谁问的、谁答的、答了什么）
+  const day = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()
+  const auditFile = join(h.pkgDir, '..', 'audit', `audit-${day}.jsonl`)
+  const consentRecords = existsSync(auditFile)
+    ? readFileSync(auditFile, 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l)).filter((r) => r.event === 'consent')
+    : []
+  check(consentRecords.some((r) => r.decision === 'granted') && consentRecords.some((r) => r.decision === 'human-panel'),
+    `授权决策进审计：${consentRecords.map((r) => r.decision).join(', ')}`)
+  hFirst.cleanup()
 }
 
 /* ── 7.9 审计：输入流水 + 输出留痕 + 归属标注 ───────────────────────────────── */
