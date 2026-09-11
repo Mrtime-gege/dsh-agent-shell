@@ -22,8 +22,11 @@
 # ─────────────────────────────────────────────────────────────────────────────────
 #
 # 注意：`npm publish` 一旦成功，同一个版本号无法重发（npm 不允许覆盖已发布版本）。
-# 因此本流程把校验放在发布之前；若发布成功但后续建 Release 失败，重跑会 401，
-# 此时应当手工补建 Release，而不是重发版本。
+# 因此本流程把校验放在发布之前，并且**发布前会查一次 registry**：
+#   * 该版本还没发布 → 正常发布；
+#   * 该版本已经在 npm 上（例如本地已经手工 publish 过，或者这次是重跑）→ **跳过发布**，
+#     只补建 GitHub Release，不会因为 E403 把整条流水线弄红。
+# 也就是说这个 workflow 是幂等的，可以安全地对着同一个 tag 重跑。
 name: Release
 
 on:
@@ -76,8 +79,24 @@ jobs:
       - name: 发布不变量检查
         run: npm run release:check
 
+      - name: 该版本是否已经在 npm 上
+        id: exists
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          # 幂等保护：同一个 tag 重跑、或本地已经 `npm publish` 过再推 tag 时，
+          # 直接发布必然 E403「cannot publish over existing version」，而 npm 不允许覆盖已发布版本。
+          # 所以先查一次；已有就跳过发布，只补建 Release。
+          if npm view "dsh-agent-shell@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::npm 上已有 dsh-agent-shell@${version}，跳过发布，只创建 GitHub Release。"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "npm 上尚无 dsh-agent-shell@${version}，本次将执行发布。"
+          fi
+
       - name: 选择发布凭据（配了 NPM_TOKEN 用 token，没配则用 OIDC）
         id: creds
+        if: steps.exists.outputs.published == 'false'
         env:
           # 只在这一步把 secret 放进环境，避免其它步骤（含第三方 action）拿到它。
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -91,13 +110,13 @@ jobs:
           fi
 
       - name: 发布到 npm（用仓库 secret NPM_TOKEN）
-        if: steps.creds.outputs.mode == 'token'
+        if: steps.exists.outputs.published == 'false' && steps.creds.outputs.mode == 'token'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: 发布到 npm（用 npm Trusted Publisher / OIDC）
-        if: steps.creds.outputs.mode == 'oidc'
+        if: steps.exists.outputs.published == 'false' && steps.creds.outputs.mode == 'oidc'
         env:
           # setup-node 生成的用户级 .npmrc 里有一行 `_authToken=${NODE_AUTH_TOKEN}`。
           # 走 OIDC 时必须让 npm 完全依赖 GitHub 的 OIDC 身份，因此换一份干净的 userconfig，
