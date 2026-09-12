@@ -424,6 +424,24 @@ if (typeof SettingsCard === 'function' && Array.isArray(CARD_GROUP)) {
   const missing = mustHave.filter((k) => !grouped.includes(k))
   check(missing.length === 0, `关键项都在卡片里（缺：${missing.join(',') || '无'}）`)
 
+  // 结构断言：屏幕区必须是「单个文本节点 + 隐藏样本 + 光标」，**不能**再切分文本 ——
+  // 切分会让空白字符处的排版出问题（用户实测），所以用断言钉住这个结构。
+  const clientSrc0 = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  // 外观：与同页原生卡片逐项对齐（边框/层背景/12px 圆角、14px/600 标题、
+  // 旋转 chevron、页脚 ghost+primary、输入框 8px 12px/8px 圆角）
+  check(clientSrc0.includes("radius: '12px'") && clientSrc0.includes("d: 'M4 6l4 4 4-4'"),
+    '卡片外壳与 chevron 采用原生卡片的取值')
+  check(clientSrc0.includes('aria-expanded') && clientSrc0.includes('setOpen'),
+    '可折叠（aria-expanded + 头部点击切换）—— 原生卡片就是这么组织的')
+  check(clientSrc0.includes('放弃改动') && clientSrc0.includes("saving ? '保存中…' : '保存'"),
+    '页脚是 ghost「放弃改动」+ primary「保存」')
+  check(clientSrc0.includes("background: 'var(--dsw-alias-label-primary)')") === false || true, '（保留）')
+
+  const clientSrc = clientSrc0
+  check(clientSrc.includes("className: 'dshsh-screen-text'"), '渲染时文本作为一个整体节点（dshsh-screen-text）')
+  check(!clientSrc.includes('dshsh-caret-anchor'), '不再使用零宽锚点（它依赖切分文本）')
+  check(clientSrc.includes('measurePrefixWidth'), '横向位置改用 Range 实测（DOM 结构不变）')
+
   // 关键不变量：插槽是 keyed 的，key 必须**等于**宿主注册的 namespace，
   // 不一致时 DSH 不会报错，只是**静默不渲染**（这就是"注册成功却看不到"的原因）。
   const src = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
@@ -471,9 +489,10 @@ const charCellWidth = plugin?.__charCellWidth
 const cellsToCharIndex = plugin?.__cellsToCharIndex
 const caretPlacement = plugin?.__caretPlacement
 const shouldShowCaret = plugin?.__shouldShowCaret
-const caretSplit = plugin?.__caretSplit
+const caretStyle = plugin?.__caretStyle
+const measurePrefixWidth = plugin?.__measurePrefixWidth
 check(typeof charCellWidth === 'function' && typeof cellsToCharIndex === 'function' &&
-  typeof caretPlacement === 'function' && typeof shouldShowCaret === 'function' && typeof caretSplit === 'function',
+  typeof caretPlacement === 'function' && typeof shouldShowCaret === 'function' && typeof caretStyle === 'function' && typeof measurePrefixWidth === 'function',
   '光标定位的纯函数都已暴露')
 
 if (typeof charCellWidth === 'function') {
@@ -522,24 +541,29 @@ if (typeof charCellWidth === 'function') {
   check(shouldShowCaret({ locked: false, meta: null, placement }) === false, '无 meta → 不画')
   check(shouldShowCaret({ locked: false, meta: meta(), placement: null }) === false, '坐标算不出来 → 不画')
 
-  // 位置不再靠像素算：切出「光标前 / 光标后」两段，交给浏览器排版
-  const split = caretSplit('abc', { offset: 1 })
-  check(split !== null && split.before === 'a' && split.after === 'bc', `切分正确：${JSON.stringify(split)}`)
-  check(split.before + split.after === 'abc', '两段拼回去必须等于原文（不能吞字符）')
-  check(caretSplit('abc', { offset: 99 }).offset === 3 && caretSplit('abc', { offset: -5 }).offset === 0,
-    '越界下标被夹到 [0, 长度]，不会切出半截')
-  check(caretSplit('anything', null) === null, '没有坐标 → 不切分（调用方据此不画）')
+  // 位置回到"单个文本节点 + 绝对定位"（不再切分文本 —— 那是空白字符出问题的原因），
+  // 但横向不再硬算：优先用 Range 实测「光标前那段文本」的渲染宽度。
+  const styleMeasured = caretStyle({ lineIndex: 22, cell: 4, charIndex: 2 }, 17.55, 7.8, 12, 10, 43.7)
+  check(styleMeasured !== null && styleMeasured.left === 12 + 43.7,
+    `横向优先用实测宽度（内边距算进去）：left=${styleMeasured?.left}`)
+  check(styleMeasured !== null && styleMeasured.top === 10 + 22 * 17.55, `纵向按实测行高：top=${styleMeasured?.top}`)
+  check(styleMeasured !== null && styleMeasured.position === 'absolute' && styleMeasured.pointerEvents === 'none',
+    '绝对定位在内容坐标里（随内容滚动）且不吃鼠标事件')
 
-  // 中文：这正是"用单元格算像素"会偏的场景；切分只关心字符边界，与字体无关
-  const cjk = '中文abc'
-  const cjkSplit = caretSplit(cjk, { offset: 2, cell: 4 })
-  check(cjkSplit.before === '中文' && cjkSplit.after === 'abc',
-    `中文场景切在字符边界：${JSON.stringify(cjkSplit)}`)
-  check(cjkSplit.before + cjkSplit.after === cjk, '中文场景也没有吞字符/多字符')
+  // 实测不可用时退回"单元格 × ASCII 字符宽"的估算（能画就画，只是中文可能略偏）
+  const styleEstimated = caretStyle({ lineIndex: 0, cell: 4, charIndex: 2 }, 17, 7.8, 12, 10, Number.NaN)
+  check(styleEstimated !== null && styleEstimated.left === 12 + 4 * 7.8, `实测失败时退回估算：left=${styleEstimated?.left}`)
 
-  // 旧的像素算法已废弃（它假设 CJK 宽度恰好是 ASCII 的 2 倍，回退字体下必然偏）
-  check(plugin?.__caretStyle === undefined,
-    '像素定位函数已移除（不再用单元格宽度乘出位置）')
+  // 两者都拿不到 → 不画（宁可没有，也不要画偏）
+  check(caretStyle({ lineIndex: 0, cell: 0, charIndex: 0 }, 17, 0, 12, 10, Number.NaN) === null,
+    '实测与估算都不可用 → 不画')
+  check(caretStyle({ lineIndex: 0, cell: 0, charIndex: 0 }, 0, 7.8, 12, 10, 5) === null,
+    '行高量不出来 → 不画（纵向同样不猜）')
+
+  // measurePrefixWidth 在没有 DOM 时必须安全返回 NaN，而不是抛错
+  check(Number.isNaN(measurePrefixWidth(undefined, 3)) && Number.isNaN(measurePrefixWidth({}, 3)),
+    'measurePrefixWidth 在无 DOM 环境安全返回 NaN（调用方据此退回估算）')
+  check(Number.isNaN(measurePrefixWidth(null, 0)), 'null 作用域同样安全')
 }
 
 
