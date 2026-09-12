@@ -170,25 +170,50 @@ if (existsSync(clientPath)) {
 
 /* ---------- 6. 不泄漏开发机信息 ---------- */
 
-const SCAN = ['lib/index.js', 'lib/tmux.js', 'lib/client.js', 'cordis.patch.yml', 'package.json']
+// 扫描范围是**整个仓库的文本文件**，不是一份手工维护的白名单。
+// 起因是一次真实失手：泄露出现在**会被发布**的 PUBLISHING.md 里（`cd /home/<用户名>/…`），
+// 而当时的白名单只覆盖 lib/* 与 package.json —— 语法检查过、测试也过，谁都没看 docs。
+// 发布出去的版本在 npm 上改不了，所以这条必须"宁可多扫，不可漏扫"。
 const LEAK = [
   [/\/home\/[A-Za-z0-9._-]+\//, '开发机 /home/<user>/ 绝对路径'],
   [/\/Users\/[A-Za-z0-9._-]+\//, '开发机 /Users/<user>/ 绝对路径'],
   [/C:\\\\Users\\\\/, '开发机 Windows 绝对路径'],
+  [/\b(?:DESKTOP|LAPTOP|WIN)-[A-Z0-9]{6,}\b/, '开发机主机名'],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, '私钥内容'],
   [/\bnpm_[A-Za-z0-9]{36}\b/, 'npm token'],
-  [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/, 'GitHub token']
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/, 'GitHub token'],
+  [/\bsk-[A-Za-z0-9]{20,}\b/, 'API key（sk- 形态）'],
+  [/\bAKIA[0-9A-Z]{12,}\b/, 'AWS access key'],
 ]
-for (const rel of SCAN) {
-  const abs = join(ROOT, rel)
-  if (!existsSync(abs)) continue
-  readFileSync(abs, 'utf8').split('\n').forEach((line, index) => {
-    for (const [pattern, what] of LEAK) {
-      if (pattern.test(line)) fail(`${rel}:${index + 1} 疑似泄漏${what}：${line.trim().slice(0, 80)}`)
+// 占位符不算泄露：文档与测试里到处都是 /home/u、/home/user 这种假路径
+const LEAK_ALLOW = [
+  /\/home\/(?:u|user|you|username|me|test|example|someone|alice|bob)\//,
+  /\/Users\/(?:you|user|username|me|alice|bob)\//,
+]
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.github'])
+function scanTree (dir, rel) {
+  for (const entry of readdirSync(join(dir), { withFileTypes: true })) {
+    if (entry.name.startsWith('.') && entry.name !== '.github') continue
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) continue
+      scanTree(join(dir, entry.name), rel === '' ? entry.name : rel + '/' + entry.name)
+      continue
     }
-  })
+    if (!entry.isFile()) continue
+    if (/\.(?:tgz|png|jpg|jpeg|webp|gif|ico|zst|woff2?|wasm)$/i.test(entry.name)) continue
+    const relPath = rel === '' ? entry.name : rel + '/' + entry.name
+    let body
+    try { body = readFileSync(join(dir, entry.name), 'utf8') } catch { continue }
+    body.split('\n').forEach((line, index) => {
+      if (LEAK_ALLOW.some((allow) => allow.test(line))) return
+      for (const [pattern, what] of LEAK) {
+        if (pattern.test(line)) fail(`${relPath}:${index + 1} 疑似泄漏${what}：${line.trim().slice(0, 80)}`)
+      }
+    })
+  }
 }
-notes.push('未发现泄漏的开发机路径或凭据')
+scanTree(ROOT, '')
+notes.push('仓库全文未发现泄露的开发机路径、主机名或凭据（含 docs 与随手写的脚本）')
 
 /* ---------- 6.2 客户端渲染引用的图标与样式类必须真实存在 ---------- */
 
