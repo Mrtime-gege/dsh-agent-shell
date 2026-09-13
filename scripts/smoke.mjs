@@ -156,7 +156,9 @@ const userQuestions = {
   ask: async (request) => {
     consentAsks.push(request)
     const id = request?.questions?.[0]?.id ?? 'unknown'
-    return { answers: [{ id, selected: ['允许本对话使用（授权执行任意命令）'] }] }
+    // 选第一个选项，不写死文案（措辞会随权限模型演进）
+    const opts = Array.isArray(request?.questions?.[0]?.options) ? request.questions[0].options : []
+    return { answers: [{ id, selected: [opts[0]?.label ?? '允许'] }] }
   },
 }
 const ctx = {
@@ -217,7 +219,7 @@ mod.apply(ctx, {
 })
 
 check(tools.size === 11, `注册工具数 = ${tools.size}（期望 11）`)
-check(routes.size === 10, `注册 HTTP 路由数 = ${routes.size}（期望 10）`)
+check(routes.size === 11, `注册 HTTP 路由数 = ${routes.size}（期望 11）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
 {
@@ -342,10 +344,21 @@ if (hasHarness) {
   console.log('  · 无 harness 祖先，跳过看门狗自愈断言')
 }
 
-// (4) 看门狗脚本的两个关键修正（静态断言，防止以后被改回去）
+// (4) 看门狗脚本的关键修正（静态断言，防止以后被改回去）
 const tmuxSrc = readFileSync(join(pkgDir, 'lib', 'tmux.js'), 'utf8')
 check(tmuxSrc.includes('grep -qv "^$$$"'), '守卫排除了看门狗自身 pid（旧写法会匹配到自己，导致 kill-server 永不执行）')
-check(tmuxSrc.includes('miss=$((miss+1))') && tmuxSrc.includes('-lt 3'), '存活判定容忍连续失败（旧写法一次失败就永久退出）')
+check(tmuxSrc.includes('miss=$((miss+1))'), '存活判定容忍连续失败（旧写法一次失败就永久退出）')
+// 重启窗口：这两个常量决定「重启 dsh web 会不会把用户的 shell 全杀掉」。
+// 旧断言写的是 includes('-lt 3') —— 而 '-lt 3' 是 '-lt 30' 的**子串**，阈值改了也照样通过，
+// 属于弱断言；这里改成解析常量并断言乘积，顺便要求脚本确实引用了常量（不与脚本脱节）。
+const missLimit = Number(/WATCHDOG_MISS_LIMIT\s*=\s*([0-9]+)/.exec(tmuxSrc)?.[1] ?? 0)
+const probeSeconds = Number(/WATCHDOG_PROBE_SECONDS\s*=\s*([0-9]+)/.exec(tmuxSrc)?.[1] ?? 0)
+check(missLimit > 0 && probeSeconds > 0,
+  `看门狗窗口是具名常量（${missLimit} 次 × ${probeSeconds}s）而不是散在脚本里的魔数`)
+check(missLimit * probeSeconds >= 60,
+  `重启窗口 ≥ 60 秒（实到 ${missLimit * probeSeconds} 秒）—— 短于 systemctl restart 的真空期就会误杀整个 tmux 服务端`)
+check(tmuxSrc.includes('-lt ${WATCHDOG_MISS_LIMIT}') && tmuxSrc.includes('sleep ${WATCHDOG_PROBE_SECONDS}'),
+  '脚本引用的就是这两个常量（改常量即改行为，不会与脚本脱节）')
 
 const empty = await call('/list', 'GET')
 check(empty.body?.sessions?.length === 0, `收尾：剩 ${empty.body?.sessions?.length} 个会话`)

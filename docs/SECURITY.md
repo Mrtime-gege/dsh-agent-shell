@@ -81,12 +81,21 @@ reporting）。该通道只对维护者可见，便于我们先修复再公开�
 
 ### 2. 高危命令拦截是启发式减速带，不是沙箱
 
-`guardDangerousCommands` 用 10 条正则匹配危险形态（`rm` 根/家目录/通配、`--no-preserve-root`、
-`mkfs`、`dd of=/dev/`、覆盖块设备、fork bomb、`chmod 777 /`、`sudo`/`doas`/`su`、
-关机重启、`curl | sh`）。
+`guardDangerousCommands` 用 20 条正则匹配危险形态，分成三组：
+
+* **通用破坏**（10 条）：`rm` 根/家目录/通配、`--no-preserve-root`、`mkfs`、`dd of=/dev/`、
+  覆盖块设备、fork bomb、`chmod 777 /`、`sudo`/`doas`/`su`、关机重启、`curl | sh`。
+* **插件自身的命门**（8 条）：`tmux kill-server` / `kill-session`、`pkill|killall tmux`、
+  `pkill|killall node`（宿主进程本身）、删除或覆盖 `~/.dsh/agent-shell`（审计与授权就在里面）、
+  用 `find -delete` 删状态目录、`rm -rf ~/.dsh`。**这一组此前完全没有保护** —— 一个
+  `tmux kill-server` 就足以把 AI 与用户的所有 shell 一起端掉。
+* **发布纪律**（2 条）：`npm publish|unpublish|dist-tag|owner|token`、`git push` 带
+  `--force|--mirror|--all|--tags`（不带 `backup` 远端时）。发版是维护者的决定，不该由 AI 代跑；
+  往公开仓库推旧标签还可能把已撤销的版本重新发布。
 
 它**可以被绕过**（字符串拼接、变量、写成脚本文件后执行、base64 等等），也**会误报**（正文里
 出现 `sudo` 的普通文本同样被拦）。它的作用只是让「AI 手滑」变成一次显式确认，不是安全边界。
+放行方式仍然是 `confirm: true`（面向人的显式确认）。
 
 真正的隔离只能靠 DSH 的沙箱模式与操作系统权限。
 

@@ -4,7 +4,8 @@
  *
  * 这个脚本把「发版时必须成立、但很容易忘」的事情变成机械检查：
  *   1. package.json 的版本号是合法 semver，且 CHANGELOG.md 里有对应段落；
- *   2. npm `files` 白名单真的覆盖了运行期需要的文件，且这些文件都存在；
+ *   2. npm `files` 白名单等于「必要文件」集合：缺必要文件报错，多带任何仓库内部文件也报错；
+ *   2.5 已发布的 README 里不许有相对链接（相对链接在 npm 页面上必然断，只能指向仓库内部文件）；
  *   3. main / exports 指向的文件存在（发布出去的包必须能 import）；
  *   4. peerDependencies 覆盖了代码里真正 import 的宿主包；
  *   5. lib/client.js 保持 classic script（一旦误加 import/export，浏览器端会整体崩掉）；
@@ -17,6 +18,7 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
+import { findLeaks, SKIP_DIRS, BINARY_FILE } from './lib/leak-rules.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const failures = []
@@ -57,15 +59,15 @@ if (pkg.private === true) {
   fail('package.json 里 private: true 会让 npm publish 直接失败')
 }
 
-const changelog = existsSync(join(ROOT, 'CHANGELOG.md'))
-  ? readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
+const changelog = existsSync(join(ROOT, 'docs', 'CHANGELOG.md'))
+  ? readFileSync(join(ROOT, 'docs', 'CHANGELOG.md'), 'utf8')
   : undefined
 if (changelog === undefined) {
-  fail('缺少 CHANGELOG.md')
+  fail('缺少 docs/CHANGELOG.md')
 } else if (!changelog.split('\n').some(line => line.startsWith('## ') && line.includes(version))) {
-  fail(`CHANGELOG.md 里没有 ${version} 的段落（应以 "## ${version}" 开头）`)
+  fail(`docs/CHANGELOG.md 里没有 ${version} 的段落（应以 "## ${version}" 开头）`)
 } else {
-  notes.push(`CHANGELOG.md 含有 ${version} 段落`)
+  notes.push(`docs/CHANGELOG.md 含有 ${version} 段落`)
 }
 
 /* ---------- 2. files 白名单与实际文件 ---------- */
@@ -74,7 +76,7 @@ const REQUIRED = [
   'LICENSE',
   'README.md',
   'README.en.md',
-  'CHANGELOG.md',
+  'docs/CHANGELOG.md',
   'cordis.patch.yml',
   'lib/index.js',
   'lib/tmux.js',
@@ -91,15 +93,134 @@ const files = Array.isArray(pkg.files) ? pkg.files : []
 if (files.length === 0) {
   fail('package.json 没有 files 白名单：会把开发文件一起发出去')
 }
-for (const entry of ['lib', 'docs', 'cordis.patch.yml', 'README.md', 'README.en.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'PUBLISHING.md', 'LICENSE']) {
-  if (!files.includes(entry)) fail(`files 白名单缺少 ${entry}`)
+
+/*
+ * 「只发必要文件」的机械定义：npm 包里只允许出现下面这些条目 ——
+ * 运行期代码、安装方式（patch + 依赖脚本）、两份 README、许可证。
+ * 其余一切（CHANGELOG / SECURITY / PUBLISHING / CONTRIBUTING / docs / scripts …）
+ * 都只留在仓库里：装包的人不需要它们，而每次发布都是把开发机信息往公开注册表上搬的一次机会。
+ */
+const PUBLISH_WHITELIST = [
+  'lib',
+  'cordis.patch.yml',
+  'install-deps.sh',
+  'README.md',
+  'README.en.md',
+  'LICENSE'
+]
+// 少了这些，装包的人要么跑不起来、要么看不懂怎么装
+const PUBLISH_REQUIRED = ['lib', 'cordis.patch.yml', 'install-deps.sh', 'README.md', 'README.en.md', 'LICENSE']
+for (const entry of PUBLISH_REQUIRED) {
+  if (!files.includes(entry)) fail(`files 白名单缺少必要文件：${entry}`)
+}
+for (const entry of files) {
+  if (!PUBLISH_WHITELIST.includes(entry)) {
+    fail(`files 白名单里有非必要文件：${entry}（只发必要文件；文档类内容留在仓库）`)
+  }
 }
 // 运行期入口不许漏在自己的白名单之外
 const libFiles = existsSync(join(ROOT, 'lib')) ? readdirSync(join(ROOT, 'lib')) : []
 if (!files.includes('lib') && libFiles.some(f => f.endsWith('.js'))) {
   fail('lib/*.js 不在 files 白名单里')
 }
-notes.push(`files 白名单：${files.join(', ')}`)
+notes.push(`files 白名单（仅必要文件）：${files.join(', ')}`)
+
+/* ---------- 2.5 已发布 README 的链接 ---------- */
+
+/*
+ * README 会跟着包发到 npm 页面。相对链接在那里必然断（解析到 npmjs.com 而不是仓库），
+ * 而且相对链接天然会指向仓库内部文件 —— 正是「非必要发布」的那些。所以：只允许绝对 URL。
+ * 指回本仓库的绝对链接则要能对上真实文件，挡住重命名后的死链。
+ */
+const REPO_BLOB = 'https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/'
+for (const rel of ['README.md', 'README.en.md']) {
+  const file = join(ROOT, rel)
+  if (!existsSync(file)) continue
+  const text = readFileSync(file, 'utf8')
+  for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+    const target = match[1]
+    if (target.startsWith('#')) continue
+    if (!/^https?:\/\//.test(target)) {
+      fail(`${rel} 里有相对链接 ${target}：README 会发布到 npm，相对链接在那里必然断（改成绝对 URL）`)
+      continue
+    }
+    if (target.startsWith(REPO_BLOB)) {
+      const targetPath = decodeURIComponent(target.slice(REPO_BLOB.length).split('#')[0])
+      if (!existsSync(join(ROOT, targetPath))) {
+        fail(`${rel} 里的仓库链接指向不存在的文件：${targetPath}`)
+      }
+    }
+  }
+}
+
+/* ---------- 2.6 文档身份（防「整份文档被别的内容覆盖」） ---------- */
+
+/*
+ * 这一节是为一次真实事故加的：PUBLISHING.md 曾被另一份文档的内容**整体覆盖**（复制事故），
+ * 发布指南从工作树里消失，而当时所有校验都是绿的 —— 因为没有任何检查在问
+ * 「这个文件还是不是它自己」。文件身份用两件机械事实锚定：
+ *   1. 首行标题必须与文件身份一致；
+ *   2. 任意两份文档不能有相同的开头（那是「一份内容写到了两个路径」的指纹）。
+ */
+const DOC_TITLES = {
+  'README.md': '# dsh-agent-shell',
+  'README.en.md': '# dsh-agent-shell',
+  'docs/CHANGELOG.md': '# Changelog',
+  'docs/SECURITY.md': '# 安全政策',
+  'docs/CONTRIBUTING.md': '# 贡献指南',
+  'docs/PUBLISHING.md': '# 发布指南',
+  'docs/使用细节.md': '# 使用细节',
+  'docs/更新记录.md': '# 更新与修复记录',
+  'docs/设计与实现.md': '# 设计与实现'
+}
+// 中英首页同标题是设计使然；其余任何重复都视为事故信号
+const TITLE_DUPLICATE_OK = new Set(['README.md', 'README.en.md'])
+const signatures = new Map()
+for (const [rel, expected] of Object.entries(DOC_TITLES)) {
+  const file = join(ROOT, rel)
+  if (!existsSync(file)) {
+    fail(`缺少文档：${rel}`)
+    continue
+  }
+  const text = readFileSync(file, 'utf8')
+  const firstLine = (text.split('\n')[0] ?? '').trim()
+  if (firstLine !== expected) {
+    fail(`${rel} 的首行标题是 "${firstLine}"，应为 "${expected}"：文档被覆盖或改名了？`)
+  }
+  const signature = text.split('\n').map(l => l.trim()).filter(l => l !== '').slice(0, 3).join('\n')
+  const twin = signatures.get(signature)
+  if (twin !== undefined && !(TITLE_DUPLICATE_OK.has(rel) && TITLE_DUPLICATE_OK.has(twin))) {
+    fail(`${rel} 与 ${twin} 的开头完全相同：很像「一份内容被写到两个路径」的事故`)
+  }
+  signatures.set(signature, rel)
+}
+notes.push(`文档身份：${Object.keys(DOC_TITLES).length} 份文档标题正确、且无重复内容`)
+
+/* ---------- 2.7 已发布的 README 不得泄露开发仓库信息 ---------- */
+
+/*
+ * 维护者要求：可以说明「开发在另一个仓库里进行」，但**不能出现私有仓库的任何具体信息**
+ * （仓库名、远端名、分支/归档命名等）。README 会随包发到 npm 页面，写进去就等于公开。
+ */
+const DEV_REPO_FORBIDDEN = [
+  // 这里**故意不写出那个仓库的全名**：本文件也在公开仓库里，写出名字等于把名字公开
+  // （这是个自指的坑 —— 守卫不能自己泄露它要守的东西）。用类别模式匹配 `*-backup` 即可。
+  [/-backup\b/i, '备份仓库名'],
+  [/dev-archive/i, '归档 tag 命名'],
+  [/私有仓库|private repo|private repository/i, '对私有仓库的描述'],
+  // 连「另有一个开发仓库」这件事都不提：README 是给读者看的，读者不需要知道内部怎么开发
+  [/另一个[^\n]{0,8}仓库|开发用的仓库|dev(elopment)?\s+repo(sitory)?/i, '提及存在另一个（开发）仓库'],
+  [/\bgit remote\b[^\n]*\bbackup\b/i, '备份远端的配置写法']
+]
+for (const rel of ['README.md', 'README.en.md']) {
+  const file = join(ROOT, rel)
+  if (!existsSync(file)) continue
+  const text = readFileSync(file, 'utf8')
+  for (const [pattern, what] of DEV_REPO_FORBIDDEN) {
+    if (pattern.test(text)) fail(`${rel} 里出现了开发/备份仓库的信息（${what}）：README 会随包发到 npm`)
+  }
+}
+notes.push('两份 README 未泄露开发仓库信息（只说「另有开发用仓库」，不含仓库名/远端名）')
 
 /* ---------- 3. 入口文件存在 ---------- */
 
@@ -174,23 +295,9 @@ if (existsSync(clientPath)) {
 // 起因是一次真实失手：泄露出现在**会被发布**的 PUBLISHING.md 里（`cd /home/<用户名>/…`），
 // 而当时的白名单只覆盖 lib/* 与 package.json —— 语法检查过、测试也过，谁都没看 docs。
 // 发布出去的版本在 npm 上改不了，所以这条必须"宁可多扫，不可漏扫"。
-const LEAK = [
-  [/\/home\/[A-Za-z0-9._-]+\//, '开发机 /home/<user>/ 绝对路径'],
-  [/\/Users\/[A-Za-z0-9._-]+\//, '开发机 /Users/<user>/ 绝对路径'],
-  [/C:\\\\Users\\\\/, '开发机 Windows 绝对路径'],
-  [/\b(?:DESKTOP|LAPTOP|WIN)-[A-Z0-9]{6,}\b/, '开发机主机名'],
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, '私钥内容'],
-  [/\bnpm_[A-Za-z0-9]{36}\b/, 'npm token'],
-  [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/, 'GitHub token'],
-  [/\bsk-[A-Za-z0-9]{20,}\b/, 'API key（sk- 形态）'],
-  [/\bAKIA[0-9A-Z]{12,}\b/, 'AWS access key'],
-]
-// 占位符不算泄露：文档与测试里到处都是 /home/u、/home/user 这种假路径
-const LEAK_ALLOW = [
-  /\/home\/(?:u|user|you|username|me|test|example|someone|alice|bob)\//,
-  /\/Users\/(?:you|user|username|me|alice|bob)\//,
-]
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.github'])
+//
+// 规则本身住在 scripts/lib/leak-rules.mjs：全历史扫描（scripts/scan-history.mjs）用同一份。
+// 历史里的同类内容曾经漏掉过一次，规则一旦分散就一定会有一处跟不上。
 function scanTree (dir, rel) {
   for (const entry of readdirSync(join(dir), { withFileTypes: true })) {
     if (entry.name.startsWith('.') && entry.name !== '.github') continue
@@ -200,16 +307,13 @@ function scanTree (dir, rel) {
       continue
     }
     if (!entry.isFile()) continue
-    if (/\.(?:tgz|png|jpg|jpeg|webp|gif|ico|zst|woff2?|wasm)$/i.test(entry.name)) continue
+    if (BINARY_FILE.test(entry.name)) continue
     const relPath = rel === '' ? entry.name : rel + '/' + entry.name
     let body
     try { body = readFileSync(join(dir, entry.name), 'utf8') } catch { continue }
-    body.split('\n').forEach((line, index) => {
-      if (LEAK_ALLOW.some((allow) => allow.test(line))) return
-      for (const [pattern, what] of LEAK) {
-        if (pattern.test(line)) fail(`${relPath}:${index + 1} 疑似泄漏${what}：${line.trim().slice(0, 80)}`)
-      }
-    })
+    for (const hit of findLeaks(body)) {
+      fail(`${relPath}:${hit.line} 疑似泄漏${hit.what}：${hit.text}`)
+    }
   }
 }
 scanTree(ROOT, '')
@@ -381,6 +485,31 @@ if (existsSync(clientPath)) {
   }
 }
 
+/* ---------- 6.45 硬依赖声明不许被改回去（DSH 0.1.5 的真实事故） ---------- */
+
+/*
+ * `subprocess` 是抽象服务，具体 provider 由 dsh-base 挂载。DSH 0.1.5 起组合顺序变了，
+ * provider 晚于本插件挂载 —— 如果 apply 里用一次性 ctx.get('subprocess')，会拿到 undefined
+ * 并早退，结果是**工具 / HTTP 路由 / 面板全部消失**，日志里只有一句"未挂载"，极难反推。
+ * 所以它必须留在 inject 声明里，让 Cordis 等它就绪再 apply。
+ */
+{
+  const abs = join(ROOT, 'lib', 'index.js')
+  const body = existsSync(abs) ? readFileSync(abs, 'utf8') : ''
+  const m = body.match(/^export const inject = \[([^\]]*)\]/m)
+  const deps = m === null ? [] : m[1].split(',').map((x) => x.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+  if (!deps.includes('tools')) fail('lib/index.js 的 inject 缺少 tools（工具注册是硬依赖）')
+  if (!deps.includes('subprocess')) {
+    fail('lib/index.js 的 inject 缺少 subprocess —— DSH≥0.1.5 上 provider 晚挂载，' +
+      '一次性 ctx.get 会拿到 undefined 并让整个插件静默失效（工具/HTTP/面板全没）')
+  }
+  // apply 期不许再有一次性的 approval 探测（同类时序陷阱 + 曾经引用未定义变量被 try/catch 吞掉）
+  if (/^  const approvalSeamMounted = ctx\.get\('approval'\)/m.test(body)) {
+    fail('approval 情报又在 apply 期一次性读取了：服务晚挂载会被永久记成 absent（请放进 approvalInfoFor）')
+  }
+  if (deps.includes('subprocess')) notes.push(`inject 硬依赖：${deps.join(', ')}（subprocess 在其中，避免晚挂载早退）`)
+}
+
 /* ---------- 6.5 安全告警不许被悄悄删掉 ---------- */
 
 // 这不是格式检查，而是一条**产品承诺**：README 顶部必须持续告诉使用者
@@ -388,7 +517,7 @@ if (existsSync(clientPath)) {
 for (const [rel, markers] of Object.entries({
   'README.md': ['由 AI 开发', '没有任何审批防护', '启发式护栏'],
   'README.en.md': ['developed by AI', 'no approval gate'],
-  'SECURITY.md': ['未经人工安全审计', '没有接入官方审批'],
+  'docs/SECURITY.md': ['未经人工安全审计', '没有接入官方审批'],
 })) {
   const abs = join(ROOT, rel)
   if (!existsSync(abs)) continue
@@ -398,6 +527,35 @@ for (const [rel, markers] of Object.entries({
   }
 }
 notes.push('安全告知内容（AI 开发 / 无审批 / 护栏非防护）均在位')
+
+/*
+ * 归属规则不许被删掉：`shell_list` 会列出**所有**会话的 shell（这是有意保留的可见性），
+ * 所以模型必须被告知「没经用户明确要求，不要动不是你创建的 shell」，否则"看得见"就会变成"随手就动"。
+ * 这条规则写在系统提示里，也在最容易被读到的几个工具描述里；用户明确要求过，别当成可选文案。
+ */
+{
+  const before = failures.length
+  const index = join(ROOT, 'lib', 'index.js')
+  const body = existsSync(index) ? readFileSync(index, 'utf8') : ''
+  if (!body.includes('Ownership rule.')) {
+    fail('lib/index.js 的系统提示里缺少归属规则（Ownership rule）—— 用户明确要求保留这一条')
+  }
+  if (!body.includes('unless the user explicitly asks')) {
+    fail('归属规则缺少「除非用户明确要求」这一半 —— 只写"不要动"会拦住用户自己要求的操作')
+  }
+  const listed = ['shell_list', 'shell_send', 'shell_read', 'shell_close']
+  for (const tool of listed) {
+    const i = body.indexOf(`name: '${tool}'`)
+    const window = i === -1 ? '' : body.slice(i, i + 1200)
+    if (!/unless the user explicitly asks|do not operate on those/.test(window)) {
+      fail(`${tool} 的描述里没有归属提醒（模型正要动手时最容易忽略系统提示）`)
+    }
+  }
+  // 只有真的没问题才打这一行 —— 失败的运行里还打"在位"就是在骗人
+  if (failures.length === before) {
+    notes.push('归属规则在位：系统提示 + 4 个关键工具描述（可见但不可随手操作）')
+  }
+}
 
 /* ---------- 6.4 浏览器面闸门的配套不变量 ---------- */
 

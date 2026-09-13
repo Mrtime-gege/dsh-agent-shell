@@ -75,16 +75,32 @@ scripts/dev-sync.sh
 * **改行为就改文档。** 新增或改名配置项、工具、HTTP 路由时，同一次提交里更新
   `README.md` 首页与 `docs/使用细节.md` 的对应表格，以及 `cordis.patch.yml` 里的配置样例。
 
+## 提交与推送
+
+* **公开仓库只放版本级提交。** 平时在本地 commit（粒度随意），**不推公开仓库**；粒度历史用
+  `bash scripts/backup-push.sh` 备份到**私有**远端 —— 那是开发中随时回滚的依靠。
+* **发版才动公开仓库**：`bash scripts/release-prepare.sh <版本>` 把自上个 tag 以来的全部提交压成**一个**
+  发布提交再推，并打 tag 触发发布。`--push` 等于发布，按铁律只有维护者本人能下这个决定。
+* 在**公开**仓库开 `wip`/`dev` 分支是没用的 —— 分支一样公开可见，所以粒度历史只能进私有远端。
+* 提交信息写**为什么**，不只是改了什么；根因与验证方式写进 `docs/更新记录.md`。
+
 ## 提交前必须跑
 
 ```sh
 npm run check          # node --check 三个源文件（语法）
-npm run release:check  # 发布不变量：版本/CHANGELOG、files 白名单、入口可达、客户端形态、凭据泄漏
+npm run release:check  # 发布不变量：版本/CHANGELOG、只发必要文件、README 链接、文档身份、入口可达、客户端形态、凭据泄漏
+npm run leak:history   # 全历史泄露扫描（含所有标签）—— 往公开仓库推之前值得跑一次
+python3 scripts/npm-unpublish-webotp.py --dry-run 0.1.0   # 撤销已发布版本：只读预演（真跑见 PUBLISHING.md §9.4）
 npm run smoke          # 打包产物冒烟测试（需要宿主 peer 与 tmux，见 docs/设计与实现.md）
 ```
 
 前两条都必须通过。`release:check` 故意做得很啰嗦，它拦住的问题（客户端半被写成 ESM、
-`files` 白名单漏了运行期文件、源码里留下开发机绝对路径）在发布后才发现会很难受。
+`files` 白名单里多带或少带文件、README 里出现会在 npm 页面上断掉的相对链接、**整份文档被别的内容
+覆盖**、源码里留下开发机绝对路径）在发布后才发现会很难受。
+
+> `release:check` 只扫**工作树**，它拦不住「工作树修好了、历史提交里还留着」—— 那正是发生过的事。
+> 所以另配了 `npm run leak:history`（两者共用 `scripts/lib/leak-rules.mjs`，避免规则漂移）。
+> 两款扫描都**不要改窄**：扫描范围本身就出过一次事故，处理流程见 `PUBLISHING.md` 第 8 节。
 
 `npm run smoke` 针对的是**打包产物**而不是源码目录：改了 `apply()` 的注册逻辑、工具参数、
 HTTP 路由或服务端启动配置（`lib/tmux.js` 的 `writeServerConfig`）时请一并跑它 ——

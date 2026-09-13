@@ -33,6 +33,21 @@ on:
   push:
     tags:
       - 'v*'
+  # 手动入口：用于「撤销已发布版本」这类注册表写入。
+  #
+  # 为什么放在这个文件里而不是新开一个 workflow：npm 的 Trusted Publisher 登记的是
+  # **workflow 文件名**，OIDC 声明里也带这个名字 —— 换个文件名的 workflow 换来的身份会被 npm 拒掉。
+  # 手动运行**不会发布任何东西**：发布 job 只在 push tag 时执行（见 jobs.publish 的 if）。
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: '要撤销的版本号（逗号分隔，例如 0.1.0,0.1.1,0.1.2）'
+        required: true
+        type: string
+      confirm:
+        description: '输入包名以确认撤销（dsh-agent-shell）'
+        required: true
+        type: string
 
 permissions:
   contents: write # 创建 GitHub Release
@@ -41,15 +56,17 @@ permissions:
 jobs:
   publish:
     name: 发布到 npm 并建 Release
+    # 只有推 tag 才发布；手动 dispatch 进来时跳过（它是给 unpublish job 用的）
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: 检出（含全部历史与 tag）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: 配置 Node 与 npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -132,17 +149,17 @@ jobs:
         run: |
           set -e
           # 与 scripts/release-check.mjs 的判定保持一致：以 "## " 开头且包含版本号的行为段落起点。
-          start="$(grep -n '^## ' CHANGELOG.md | grep -F "${VERSION}" | head -1 | cut -d: -f1)"
+          start="$(grep -n '^## ' docs/CHANGELOG.md | grep -F "${VERSION}" | head -1 | cut -d: -f1)"
           if [ -z "${start}" ]; then
-            echo "::error::CHANGELOG.md 里找不到 ${VERSION} 的段落（应以 \"## ${VERSION}\" 开头）"
+            echo "::error::docs/CHANGELOG.md 里找不到 ${VERSION} 的段落（应以 \"## ${VERSION}\" 开头）"
             exit 1
           fi
           # 下一段标题（若有）就是本段落的结束位置；行号相对 tail 的起点，故换算成相对行数。
-          next="$(tail -n "+$((start + 1))" CHANGELOG.md | grep -n '^## ' | head -1 | cut -d: -f1)"
+          next="$(tail -n "+$((start + 1))" docs/CHANGELOG.md | grep -n '^## ' | head -1 | cut -d: -f1)"
           if [ -n "${next}" ]; then
-            tail -n "+$((start + 1))" CHANGELOG.md | head -n "$((next - 1))" > /tmp/release-notes.md
+            tail -n "+$((start + 1))" docs/CHANGELOG.md | head -n "$((next - 1))" > /tmp/release-notes.md
           else
-            tail -n "+$((start + 1))" CHANGELOG.md > /tmp/release-notes.md
+            tail -n "+$((start + 1))" docs/CHANGELOG.md > /tmp/release-notes.md
           fi
           if [ ! -s /tmp/release-notes.md ]; then
             echo "本次发布详见 CHANGELOG.md。" > /tmp/release-notes.md
@@ -162,3 +179,85 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --notes-file /tmp/release-notes.md
+
+  # ── 手动撤销：用同一个受信发布者身份换短期 token，再调 npm 撤销指定版本 ────────────────
+  #
+  # 为什么放在 CI 而不是本机：账号的 2FA 第二因子若是**通行密钥（WebAuthn）**，
+  # CLI 的 `--otp` 要的是 6 位动态码（TOTP），本机根本拿不到 —— 注册表只会一直回
+  # `www-authenticate: OTP`。这条路的身份来自 GitHub OIDC，不需要任何交互式 2FA。
+  #
+  # 换取流程照搬 npm 自己的 lib/utils/oidc.js：
+  #   1) GET  $ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org  → GitHub id_token
+  #   2) POST /-/npm/v1/oidc/token/exchange/package/<包名>（Bearer id_token） → 短期 npm token
+  #
+  # 边界：npm 只把受信发布者用于「发布」，这个 token 能不能做**写入**由注册表说了算 ——
+  # 若被拒，日志里是 401/403，不会留下半成品状态（unpublish 的第一步就会失败）。
+  unpublish:
+    name: 撤销已发布版本
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'dsh-agent-shell'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: 检出
+        uses: actions/checkout@v5
+
+      - name: 配置 Node 与 npm registry
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 确保 npm 版本满足 OIDC 要求
+        run: |
+          npm install -g 'npm@^11'
+          npm -v
+
+      - name: 用 GitHub OIDC 换 npm 短期 token
+        id: oidc
+        run: |
+          set -euo pipefail
+          json_field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s)[process.argv[1]]||"")}catch{process.stdout.write("")}})' "$1"; }
+
+          echo "── 1/2 取 GitHub id_token（audience=npm:registry.npmjs.org）"
+          id_token="$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" | json_field value)"
+          if [ -z "${id_token}" ]; then
+            echo "::error::拿不到 GitHub OIDC id_token（检查本 job 的 id-token: write 权限）"
+            exit 1
+          fi
+
+          echo "── 2/2 用 id_token 换 npm token"
+          response="$(curl -sS -X POST -H "Authorization: Bearer ${id_token}" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/dsh-agent-shell")"
+          token="$(printf '%s' "${response}" | json_field token)"
+          if [ -z "${token}" ]; then
+            echo "::error::换 token 失败，注册表回应：$(printf '%s' "${response}" | head -c 300)"
+            exit 1
+          fi
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+          echo "✓ 已拿到短期 token（已加入日志掩码）"
+
+      - name: 撤销指定版本
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.oidc.outputs.token }}
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          set -uo pipefail
+          failed=0
+          for v in $(printf '%s' "${VERSIONS}" | tr ',' ' '); do
+            [ -z "${v}" ] && continue
+            echo "── 撤销 dsh-agent-shell@${v}"
+            if npm unpublish "dsh-agent-shell@${v}"; then
+              echo "  ✓ 已撤销 ${v}"
+            else
+              echo "  ✗ ${v} 撤销失败（EOTP/E401 表示该 token 不被允许做写入）"
+              failed=1
+            fi
+          done
+          echo "── 注册表当前状态"
+          curl -sS -H 'accept: application/json' https://registry.npmjs.org/dsh-agent-shell \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log("  版本:",Object.keys(j.versions||{}).join(", "));console.log("  dist-tags:",JSON.stringify(j["dist-tags"]))})'
+          exit "${failed}"

@@ -28,3 +28,7 @@ desktop.ini
 # 本地临时目录与实验产物
 tmp/
 .tmp/
+
+# Python 编译产物（scripts/ 下有 .py 工具脚本）
+__pycache__/
+*.pyc

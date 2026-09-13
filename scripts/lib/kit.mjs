@@ -77,9 +77,16 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   const pkgDir = join(root, 'package')
 
   const subprocess = {
-    spawn ({ argv, cwd }) {
+    spawn ({ argv, cwd, stdio = {} }) {
       const [cmd, ...rest] = argv
-      const child = spawn(cmd, rest, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      // 支持 stdio 指定：'pipe' 时暴露真实管道（control-mode 长驻客户端需要
+      // handle.stdin 可写、handle.stdout 可读）；缺省保持旧的 'ignore'-in + collect-out。
+      const stdioArr = [
+        stdio.stdin === 'pipe' ? 'pipe' : 'ignore',
+        'pipe',
+        'pipe',
+      ]
+      const child = spawn(cmd, rest, { cwd, stdio: stdioArr })
       const out = []; const err = []
       child.stdout.on('data', c => out.push(c))
       child.stderr.on('data', c => err.push(c))
@@ -89,6 +96,10 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
       })
       return {
         done,
+        stdin: child.stdin,          // 'pipe' 时存在：control 客户端往上面写命令
+        stdout: child.stdout,        // 'pipe' 时存在：control 客户端按行读通知/回复
+        stderr: child.stderr,
+        terminate () { try { child.kill('SIGTERM') } catch { /* 忽略 */ } },
         collected: {
           stdout: { readFrom: () => ({ text: Buffer.concat(out).toString('utf8') }) },
           stderr: { readFrom: () => ({ text: Buffer.concat(err).toString('utf8') }) },
@@ -104,7 +115,14 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
 
   // 可选：假的 ctx.settings（官方 installSection 契约）。用来验证「服务在 → 注册并热更；
   // 服务不在 → 退回组合配置仍能工作」两条路径，而不必真去起一个 DSH。
-  let settingsSource = () => config
+  //
+  // ⚠ socket 必须进 settings 源：插件注册 settings 时会用 schema 默认值补全缺失字段，
+  // 而 schema 里 socket 的默认是 **dsh-agent（生产 socket 名）**。若 settings 源里没有
+  // socket，带 `__withSettings` 的测试插件的 `resolved.socket` 就会变成生产值 —— 测试
+  // 真的会在用户的服务端上建会话（实测踩过：一次崩溃把会话留在了生产 tmux 服务端上，
+  // 后续测试立刻撞上 maxSessions 上限）。config 里有 socket 时仍以 config 为准
+  // （有测试专门注入恶意 socket 名验证收敛）。
+  let settingsSource = () => ({ socket, ...config })
   const settingsChanges = []
   const settingsRegistrations = []
   // 可选：假的 ctx.systemPrompt（验证「注册了使用策略段落」而不必真起 DSH）
@@ -129,8 +147,26 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
             error.code = 'DELEGATED_CALLER'
             throw error
           }
+          // 'hang'：问了但永远不回答 —— 用来验证插件的**超时**路径。超时必须按拒绝处理，
+          // 而不是把工具调用无限挂住；真实 DSH 里这等于用户走开了没理这个弹窗。
+          if (config.__consentMode === 'hang') {
+            return new Promise((_resolve, reject) => {
+              const signal = request?.signal
+              if (signal !== undefined && typeof signal.addEventListener === 'function') {
+                signal.addEventListener('abort', () => reject(new Error('consent question aborted')), { once: true })
+              }
+            })
+          }
           const id = request?.questions?.[0]?.id ?? 'unknown'
-          const wanted = config.__consentAnswer === 'denied' ? '不允许' : '允许本对话使用（授权执行任意命令）'
+          // 选第一个选项（而不是写死文案）：问题措辞会随权限模型演进，
+          // 测试不该因为改了 label 就碎 —— 要碎也应该碎在'档位数量'这类结构性断言上。
+          const opts = Array.isArray(request?.questions?.[0]?.options) ? request.questions[0].options : []
+          // __consentAnswer 指定选第几档：denied = 最后一个（完全禁止），
+          // readonly = 只读档，15min = 15 分钟档，默认第一档（完全控制）。
+          const pick = config.__consentAnswer === 'denied' ? opts.length - 1
+            : config.__consentAnswer === 'readonly' ? 2
+              : config.__consentAnswer === '15min' ? 1 : 0
+          const wanted = opts[pick]?.label ?? opts[0]?.label ?? '允许'
           return { answers: [{ id, selected: [wanted] }] }
         },
       }
@@ -271,7 +307,7 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
     if (settings === undefined || settingsHooks === null) {
       throw new Error('测试未启用假 settings 服务（传 __withSettings: true）')
     }
-    const raw = { ...config, ...next, __withSettings: true }
+    const raw = { socket, ...config, ...next, __withSettings: true }
     const schema = settingsRegistrations[0]?.schema
     const candidate = typeof schema === 'function' ? schema(raw) : raw
     if (typeof settingsHooks.validate === 'function') settingsHooks.validate(candidate)

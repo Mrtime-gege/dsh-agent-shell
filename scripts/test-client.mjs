@@ -427,15 +427,28 @@ if (typeof SettingsCard === 'function' && Array.isArray(CARD_GROUP)) {
   // 结构断言：屏幕区必须是「单个文本节点 + 隐藏样本 + 光标」，**不能**再切分文本 ——
   // 切分会让空白字符处的排版出问题（用户实测），所以用断言钉住这个结构。
   const clientSrc0 = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
-  // 外观：与同页原生卡片逐项对齐（边框/层背景/12px 圆角、14px/600 标题、
-  // 旋转 chevron、页脚 ghost+primary、输入框 8px 12px/8px 圆角）
-  check(clientSrc0.includes("radius: '12px'") && clientSrc0.includes("d: 'M4 6l4 4 4-4'"),
-    '卡片外壳与 chevron 采用原生卡片的取值')
+  // 外观：逐项照官方编译产物取值（@deepseek-ai/dsh-client-ui-settings-plugins 的
+  // PluginCard.module.css / fields.module.css —— 它们以字符串内联在该包 client.js 顶部，
+  // 可以直接读到真值）。早前一版是"凭印象对齐"：12px 圆角、14px 标题、1px border-l2、
+  // 输入框 8px 12px —— 每一项都与官方真值不同，所以并排看就是不齐。
+  // 下面把真值钉住，防止再退回猜测值。
+  check(clientSrc0.includes('.dshsh-cfg-card{border:.5px solid var(--dsw-alias-border-l4)') &&
+        clientSrc0.includes('border-radius:16px'),
+    '卡片外壳 .5px border-l4 + 16px 圆角（官方 PluginCard.card；不是 1px/12px）')
+  check(clientSrc0.includes('.dshsh-cfg-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600'),
+    '标题 15px/600（官方 PluginCard.name；不是 14px）')
+  check(clientSrc0.includes('.dshsh-cfg-body{border-top:.5px solid var(--dsw-alias-border-l2);margin:0 16px'),
+    'body 有 .5px 上边框 + 左右 16px 外缩（官方 PluginCard.body）')
+  check(clientSrc0.includes('height:34px;padding:0 12px'),
+    '输入框高 34px / padding 0 12px（官方 fields.input；不是靠 8px 12px 内边距撑出来的高度）')
+  check(clientSrc0.includes('.dshsh-cfg-discard,.dshsh-cfg-save{appearance:none;font:inherit') &&
+        clientSrc0.includes('padding:5px 14px;font-size:13px'),
+    '两个按钮同尺寸（官方 discard/save 都是 5px 14px + 13px；早前 primary 是 6px 16px，会高一截）')
+  check(clientSrc0.includes("d: 'M4 6l4 4 4-4'"), 'chevron 与官方同一个 16×16 路径')
   check(clientSrc0.includes('aria-expanded') && clientSrc0.includes('setOpen'),
     '可折叠（aria-expanded + 头部点击切换）—— 原生卡片就是这么组织的')
   check(clientSrc0.includes('放弃改动') && clientSrc0.includes("saving ? '保存中…' : '保存'"),
     '页脚是 ghost「放弃改动」+ primary「保存」')
-  check(clientSrc0.includes("background: 'var(--dsw-alias-label-primary)')") === false || true, '（保留）')
 
   const clientSrc = clientSrc0
   check(clientSrc.includes("className: 'dshsh-screen-text'"), '渲染时文本作为一个整体节点（dshsh-screen-text）')
@@ -564,10 +577,205 @@ if (typeof charCellWidth === 'function') {
   check(Number.isNaN(measurePrefixWidth(undefined, 3)) && Number.isNaN(measurePrefixWidth({}, 3)),
     'measurePrefixWidth 在无 DOM 环境安全返回 NaN（调用方据此退回估算）')
   check(Number.isNaN(measurePrefixWidth(null, 0)), 'null 作用域同样安全')
+
+  /* ── 光标横向定位：Range 必须限定在**光标所在的那一行** ──────────────────────
+   * 用户报的"光标被渲染到了本行的最后"就是这一条：跨行区间（屏幕开头 → 光标）的
+   * getBoundingClientRect() 返回的是**并集包围盒**，宽度≈最宽的一行（通常就是整屏宽），
+   * 于是插入点被推到行尾。单行区间的包围盒才等于该行前缀的真实宽度。 */
+  const prefixRangeOffsets = plugin?.__prefixRangeOffsets
+  check(typeof prefixRangeOffsets === 'function', 'prefixRangeOffsets 已暴露（纯函数才能离线断言）')
+  if (typeof prefixRangeOffsets === 'function') {
+    check(JSON.stringify(prefixRangeOffsets({ offset: 100, charIndex: 4 })) === '{"from":96,"to":100}',
+      '区间 = 本行行首 → 光标（不是 0 → 光标）')
+    const lineStart = prefixRangeOffsets({ offset: 40, charIndex: 0 })
+    check(lineStart !== null && lineStart.from === 40 && lineStart.to === 40,
+      '光标在行首 → 区间折叠（宽度 0），不会退到上一行去量')
+    check(prefixRangeOffsets(null) === null && prefixRangeOffsets(undefined) === null, '无 placement → null')
+    check(prefixRangeOffsets({ offset: Number.NaN, charIndex: 1 }) === null, 'offset 不是数 → null')
+    check(prefixRangeOffsets({ offset: 3, charIndex: 9 }) === null, 'charIndex 大于 offset（数据不自洽）→ null')
+    // 与 caretPlacement 串起来：三行屏幕、光标在第 2 行第 3 格（行首绝对下标 4）
+    const placement = caretPlacement({
+      screen: 'aaa\nbbbbb\ncc',
+      meta: { paneHeight: 3, cursorY: 1, cursorX: 2, cursorVisible: true },
+    })
+    const span = prefixRangeOffsets(placement)
+    check(placement !== null && span !== null && span.from === 4 && span.to === 6,
+      `caretPlacement → 区间就是"第 2 行行首(4) → 光标(6)"（实到 ${span?.from}→${span?.to}）`)
+  }
+
+  // DOM 路径：装一个假 createRange，断言区间端点与返回值（没有浏览器也能钉住这个行为）
+  {
+    const calls = []
+    const savedDocument = context.window.document
+    context.window.document = {
+      createRange: () => ({
+        setStart: (_node, offset) => { calls.push(['start', offset]) },
+        setEnd: (_node, offset) => { calls.push(['end', offset]) },
+        getBoundingClientRect: () => ({ width: 42 }),
+      }),
+    }
+    try {
+      const textNode = { textContent: 'aaa\nbbbbb\ncc' }   // 长度 12
+      const scope = { querySelector: (sel) => (sel === '.dshsh-screen-text' ? { firstChild: textNode } : null) }
+      const width = measurePrefixWidth(scope, 4, 6)
+      check(width === 42, `DOM 路径返回实测宽度（${width}）`)
+      const start = (calls.find(([kind]) => kind === 'start') ?? [])[1]
+      const end = (calls.find(([kind]) => kind === 'end') ?? [])[1]
+      check(start === 4 && end === 6,
+        `Range 两端是 ${start}→${end}（期望 4→6）：起点必须是**本行行首**，从 0 起量正是"光标跑到行尾"的根因`)
+      calls.length = 0
+      measurePrefixWidth(scope, 4, 999)
+      check((calls.find(([kind]) => kind === 'end') ?? [])[1] === 12, 'to 越界被夹到文本长度（12）')
+      calls.length = 0
+      measurePrefixWidth(scope, 999, 4)
+      const collapsed = calls.map(([, offset]) => offset)
+      check(collapsed[0] === 12 && collapsed[1] === 12,
+        `from > to 时两端收敛到同一点（${collapsed.join('→')}）—— 否则 setEnd 小于 setStart 会抛 IndexSizeError`)
+    } finally {
+      if (savedDocument === undefined) delete context.window.document
+      else context.window.document = savedDocument
+    }
+  }
 }
 
 
 /* ── 「关闭 shell」必须两步（它与「收起」相邻但后果不可撤销）────────────────── */
+
+/* ── 授权浮层：行模型 / 剩余时间 / 时间档换算 ───────────────────────────── */
+
+{
+  const entryRows = plugin?.__consentEntryRows
+  const remainingLabel = plugin?.__consentRemainingLabel
+  const ttlSeconds = plugin?.__consentTtlSeconds
+  const summaryText = plugin?.__consentSummaryText
+  check([entryRows, remainingLabel, ttlSeconds, summaryText].every((f) => typeof f === 'function'),
+    '授权浮层的四个纯函数都暴露出来了')
+
+  if (typeof remainingLabel === 'function') {
+    const now = 1_000_000
+    check(remainingLabel(null, now) === '永久', '永久显示"永久"')
+    check(remainingLabel(now + 9 * 60000, now) === '剩 9 分', '不足一小时显示分钟')
+    check(remainingLabel(now + 3 * 3600000, now) === '剩 3 小时', '小时级显示小时')
+    check(remainingLabel(now + 72 * 3600000, now) === '剩 3 天', '超过两天显示天')
+    check(remainingLabel(now - 1, now) === '已过期', '过期显示"已过期"而不是负数')
+  }
+
+  if (typeof ttlSeconds === 'function') {
+    check(ttlSeconds('10m', '') === 600 && ttlSeconds('30m', '') === 1800 && ttlSeconds('2h', '') === 7200,
+      '固定三档换算正确')
+    check(ttlSeconds('forever', '') === null, '永久 → null（不是 0，也不是超大数）')
+    check(ttlSeconds('custom', '30') === 1800, '自定义按分钟换算')
+    check(ttlSeconds('custom', '') === null && ttlSeconds('custom', 'abc') === null
+      && ttlSeconds('custom', '-5') === null, '自定义非法输入 → null（交给宿主拒绝并回报，不偷偷夹取）')
+  }
+
+  if (typeof entryRows === 'function') {
+    const now = 1_000_000
+    const rows = entryRows([
+      { actor: 'aaaaaaaa-1111', title: '重构 tmux 探测', scope: 'read', expiresAt: now + 600000, uses: 4, lastUsedAt: 900 },
+      { actor: 'bbbbbbbb-2222', title: '', scope: 'full', expiresAt: null, uses: 1, lastUsedAt: 100 },
+    ], now)
+    check(rows.length === 2, '两行都渲染出来')
+    check(rows[0].label === '重构 tmux 探测' && rows[0].hasTitle === true, '有标题就显示标题')
+    check(rows[1].label === '会话 bbbbbbbb' && rows[1].hasTitle === false,
+      '没标题退化成短 id（不显示空白，也不编造名字）')
+    check(rows[0].isRecent === true && rows[1].isRecent === false,
+      '最近使用的那条被标注出来（这正是"会话多了找不到当前那个"的解法）')
+    check(rows[0].scopeLabel === '只读' && rows[1].scopeLabel === '完全控制', '档位显示中文名')
+    check(rows[0].remaining === '剩 10 分' && rows[1].remaining === '永久', '每行显示剩余时间')
+    check(entryRows(null, now).length === 0 && entryRows(undefined, now).length === 0,
+      '没有数据时返回空列表（浮层据此显示空状态）')
+  }
+
+  if (typeof summaryText === 'function') {
+    check(summaryText(null).includes('没有全局授权'), '没有通配授权时如实说明')
+    check(summaryText({ scope: 'read', expiresAt: null }).includes('只读'), '有通配授权时显示档位')
+  }
+
+  // 结构：浮层需要的样式类必须真的存在（否则浮层会渲染成裸元素）
+  const css = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  for (const cls of ['dshsh-cmenu', 'dshsh-cmenu-seg', 'dshsh-cmenu-item', 'dshsh-cmenu-name', 'dshsh-cmenu-badge']) {
+    check(css.includes('.' + cls), `授权浮层样式存在：.${cls}`)
+  }
+  check(css.includes("consentMenuOpen ? h('div', { key: 'cmenu'"), '浮层确实接进了渲染树（不是只写了样式）')
+}
+
+/* ── 设置卡片的布局不变量（两次真实的"错位"事故） ─────────────────────────── */
+
+// 事故一（早先修过）：每一行各自是独立 grid，标签列宽弹性 → 每行按自己的内容算一套列宽，
+//   输入框列在行与行之间对不齐；长键名还会顶出格子。当时的修法是"所有行共用父级网格"。
+// 事故二（这次修的）：共用父级网格**仍然**错位，三个独立原因 ——
+//   ① 网格 minmax(140px,200px) / minmax(150px,220px) 有约 342px 的最小宽度，面板窄时溢出卡片边框；
+//   ② 错误/只读提示是网格子项却没有 grid-column:1/-1，它挤进第 1 列，并把**其后每一行都推移一格**；
+//   ③ 页脚是 body 的**兄弟**而非子节点，不吃 body 的 16px 内缩，宽度和上面的字段对不齐。
+// 现在与官方 PluginCard 一致：字段纵向堆叠（根本没有列宽概念），提示与页脚都是整行块。
+{
+  const src = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  check(!src.includes('gridTemplateColumns'),
+    '卡片不再用网格布局（固定列宽是两次错位事故的共同根源）')
+  check(!src.includes("display: 'contents'") && !src.includes('display:contents'),
+    '不再需要 display:contents 行（网格没了，它也没有存在的理由）')
+  check(src.includes('.dshsh-cfg-field{flex-direction:column;gap:6px;padding:12px 0;display:flex}') &&
+        src.includes('.dshsh-cfg-field+.dshsh-cfg-field{border-top:.5px'),
+    '字段纵向堆叠 + 相邻字段 .5px 分隔线（官方 fields.field 的做法）')
+  check(src.includes('.dshsh-cfg-togglerow{') && src.includes('justify-content:space-between'),
+    '布尔项走 toggleRow：标签左、开关右（官方 SubagentModelSelectionCard 的做法）')
+  check(src.includes("h('li', {") && src.includes("'dshsh-cfg-card dshsh-cfg-card-open'"),
+    '卡片根节点是 <li>（官方 .cards 容器是 <ul>，原生卡片根节点就是 li）')
+  // 页脚必须在 body 内部：官方层级如此，否则页脚不吃 body 的 16px 内缩 → 宽度对不齐
+  const bodyAt = src.indexOf("className: 'dshsh-cfg-body'")
+  const footerAt = src.indexOf("className: 'dshsh-cfg-footer'")
+  check(bodyAt > 0 && footerAt > bodyAt, '页脚在 body 内部（官方 PluginCard 的层级）')
+  // 提示必须是整行块：早前作为网格子项，会把其后每一行都推移一格
+  check(src.includes("className: 'dshsh-cfg-readonly', role: 'status'") &&
+        src.includes("className: 'dshsh-cfg-failed', role: 'status'"),
+    '只读/错误提示是整行 <p role=status>（不会再挤进某一列把后续行推移）')
+  check(/text-overflow:ellipsis/.test(src), '长键名截断显示，而不是把布局顶开')
+  check(!src.includes('CARD_CHROME'),
+    '内联外观对象已移除（内联写不了 :hover / :focus-visible / 相邻选择器）')
+}
+
+/* ── 面板头部：紧凑模式与授权按钮（两个纯函数） ───────────────────────── */
+
+const headCompact = plugin?.__headCompact
+const consentButtonModel = plugin?.__consentButtonModel
+check(typeof headCompact === 'function' && typeof consentButtonModel === 'function',
+  '头部紧凑判定与授权按钮模型已暴露')
+
+if (typeof headCompact === 'function') {
+  check(headCompact(360) === true, '最小宽度（360）下进入紧凑模式：按钮不会被挤出浮窗（真实 bug）')
+  check(headCompact(469) === true, '差一点到阈值也仍然紧凑')
+  check(headCompact(470) === false, '达到阈值后恢复完整头部（计数/标题/抓手都回来）')
+  check(headCompact(1200) === false, '宽面板显然是完整模式')
+  check(headCompact(undefined) === true && headCompact(NaN) === true,
+    '宽高还没测出来时走保守路径：先紧凑，不让按钮跑出去')
+}
+
+if (typeof consentButtonModel === 'function') {
+  const idle = consentButtonModel(null)
+  check(idle.allowAll === false && idle.label === '未授权', '没有状态数据时显示「未授权」')
+  check(idle.className === 'dshsh-btn', '未授权时不高亮')
+  check(idle.title.includes('点击可主动授权'), '未授权时告诉用户这个按钮能主动授权')
+  check(idle.icon === 'shield', '授权按钮用盾牌图标')
+
+  const on = consentButtonModel({ enabled: true, allowAll: true, granted: ['a', 'b'] })
+  check(on.allowAll === true && on.label === '已授权', '已授权时显示「已授权」')
+  check(on.className.includes('on'), '已授权时高亮（状态看得出来）')
+  check(on.title.includes('立即撤销'), '已授权时说明点一下就能立即撤销')
+  check(on.count === 2 && on.title.includes('2'), '把单独授权过的对话数一并说明，不含糊')
+
+  const off = consentButtonModel({ enabled: false, allowAll: false, granted: [] })
+  check(off.enabled === false, '配置关掉确认门时如实标注')
+  check(off.title.includes('requireConsent'), '并说明是配置项关掉的，而不是假装按钮无用')
+
+  // 契约：紧凑模式下被隐藏的类必须真的存在（否则隐藏规则是空转）
+  const css = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  for (const cls of ['dshsh-head', 'dshsh-compact', 'dshsh-name']) {
+    check(css.includes('.' + cls), `紧凑模式相关样式类存在：.${cls}`)
+  }
+  check(css.includes('.dshsh-compact .dshsh-name-text'), '紧凑规则确实隐藏了标题文字')
+  check(css.includes('.dshsh-compact .dshsh-count'), '紧凑规则确实隐藏了计数')
+}
 
 const closeActionFor = plugin?.__closeActionFor
 const closeButtonModel = plugin?.__closeButtonModel
@@ -905,6 +1113,143 @@ if (typeof ShellPanel === 'function') {
         let repeatError = ''
         try { fn() } catch (error) { repeatError = String(error && error.message ? error.message : error) }
         check(repeatError === '', '视图切换 effect 重复执行不会出错（key 未变时直接返回）')
+      }
+    }
+  }
+
+  /* ── 设置卡片：断言**渲染出来的树**，而不只是源码里的字符串 ─────────────────
+   *
+   * 源码字符串断言抓不到三类真问题：层级写错（页脚跑到 body 外面）、提示被塞进某一列、
+   * 以及只在渲染时才抛的错。这里用同一个假 React 重建 SettingsCard，把它的 state 单元
+   * 换成"宿主已返回字段"的快照，然后对元素树做结构断言。
+   * 这一组断言就是"设置卡片错位"事故的回归网。
+   */
+  {
+    const cardFake = makeFakeReact()
+    const savedCardRequire = context.require
+    context.require = (id) => (id === 'react' ? cardFake.hooks : savedCardRequire(id))
+    let card = null
+    let buildError = ''
+    try {
+      cardFake.reset()
+      card = loaded[0].factory(context.require).__SettingsCard
+    } catch (error) {
+      buildError = String(error && error.message ? error.message : error)
+    }
+    context.require = savedCardRequire
+    check(typeof card === 'function', `用假 React 重建设置卡片${buildError === '' ? '' : ' —— ' + buildError}`)
+
+    if (typeof card === 'function') {
+      // 三组、四种字段形态：字符串（需重启）、数字、两个布尔
+      const FIELDS = [
+        { key: 'shell', type: 'string', value: 'bash', description: '解释器', restartRequired: true },
+        { key: 'cols', type: 'number', value: 120, description: '列数', restartRequired: false },
+        { key: 'audit', type: 'boolean', value: true, description: '写审计流水' },
+        { key: 'requireConsent', type: 'boolean', value: true, description: '首次使用要人授权' },
+      ]
+      const READY = { status: 'ready', fields: FIELDS, note: '已保存，并已立即生效', writable: true, error: '' }
+
+      // 先跑一次 loading 态：既验证不抛错，也让 cells 按 hook 顺序就位
+      cardFake.reset()
+      let loadingTree = null
+      let loadingError = ''
+      try { loadingTree = card() } catch (error) { loadingError = String(error && error.message ? error.message : error) }
+      check(loadingError === '', `loading 态渲染不抛错${loadingError === '' ? '' : ' —— ' + loadingError}`)
+      check(loadingTree !== null && loadingTree.type === 'li',
+        '卡片根节点是 <li>（官方 .cards 容器是 <ul>，原生卡片根节点就是 li）')
+
+      const cells = cardFake.cells()
+      const stateIndex = cells.findIndex((c) => c !== null && typeof c === 'object' && !Array.isArray(c) && c.status === 'loading')
+      // draft 单元是唯一的"空普通对象"（ref 有 current、open/saving 是布尔、state 有 status）
+      const draftIndex = cells.findIndex((c) => c !== null && typeof c === 'object' && !Array.isArray(c) &&
+        c.status === undefined && !('current' in c) && Object.keys(c).length === 0)
+      check(stateIndex >= 0 && draftIndex >= 0, `定位到 state(${stateIndex}) 与 draft(${draftIndex}) 单元`)
+
+      /** 注入快照后重渲染；抛错则返回 null（由调用方断言）。 */
+      const render = (state, draft) => {
+        if (stateIndex >= 0) cells[stateIndex] = state
+        if (draft !== undefined && draftIndex >= 0) cells[draftIndex] = draft
+        cardFake.reset()
+        try { return card() } catch { return null }
+      }
+
+      const collectByClass = (node, cls, out = []) => {
+        if (Array.isArray(node)) { for (const n of node) collectByClass(n, cls, out); return out }
+        if (node === null || typeof node !== 'object') return out
+        if (String((node.props || {}).className || '').split(/\s+/).includes(cls)) out.push(node)
+        collectByClass(node.children, cls, out)
+        return out
+      }
+      const kids = (node) => (node === null || !Array.isArray(node.children) ? [] : node.children)
+        .filter((c) => c !== null && typeof c === 'object')
+      const directChild = (node, cls) => kids(node).find((c) =>
+        String((c.props || {}).className || '').split(/\s+/).includes(cls)) ?? null
+
+      const ready = render(READY)
+      check(ready !== null, '就绪态渲染不抛错')
+      if (ready !== null) {
+        check(String(ready.props.className).includes('dshsh-cfg-card'), '根节点带卡片类名')
+        const body = directChild(ready, 'dshsh-cfg-body')
+        check(body !== null, 'body 是卡片的直接子节点')
+        const footer = directChild(body, 'dshsh-cfg-footer')
+        check(footer !== null, '页脚是 body 的**直接子节点**（早前是 body 的兄弟 → 不吃 16px 内缩，宽度对不齐）')
+        check(collectByClass(ready, 'dshsh-cfg-field').length === FIELDS.length,
+          `字段数 ${collectByClass(ready, 'dshsh-cfg-field').length}（期望 ${FIELDS.length}）`)
+        check(collectByClass(ready, 'dshsh-cfg-hint').length === FIELDS.length,
+          '每个字段都有一条整行说明（不再是网格里的第三列）')
+        const toggles = collectByClass(ready, 'dshsh-cfg-togglerow')
+        check(toggles.length === 2, `两个布尔项走 toggleRow（实到 ${toggles.length}）`)
+        const boxes = collectByClass(ready, 'dshsh-cfg-check')
+        check(boxes.length === 2 && boxes.every((b) => b.type === 'input' && b.props.type === 'checkbox'),
+          '布尔项的控件是 checkbox')
+        const inputs = collectByClass(ready, 'dshsh-cfg-input')
+        check(inputs.length === 2 && inputs.map((i) => i.props.type).sort().join(',') === 'number,text',
+          '取值项的控件类型跟着字段类型走（text / number）')
+        const labels = collectByClass(ready, 'dshsh-cfg-label')
+        check(labels.length === 2 && labels.every((l) => l.type === 'label' && typeof l.props.htmlFor === 'string' && l.props.htmlFor.length > 0),
+          '取值项的标签是 <label for=…>（点标签能聚焦输入框）')
+        const badges = collectByClass(ready, 'dshsh-cfg-badge')
+        check(badges.length === 1 && badges[0].children.join('') === '需重启',
+          '只有 restartRequired 的字段带「需重启」徽标')
+        const groups = collectByClass(ready, 'dshsh-cfg-group')
+        check(groups.length === 3 && groups.every((g) => g.type === 'p'),
+          `分组标题是整行 <p>（${groups.length} 组，期望 3）`)
+        // 顺序：分组标题必须紧挨在它那一组第一个字段之前 —— 反了会让分隔线出现在组标题上方
+        const bodyKids = kids(body).map((c) => String((c.props || {}).className || ''))
+        check(bodyKids[0] === 'dshsh-cfg-group' && bodyKids[1] === 'dshsh-cfg-field',
+          'body 里先是分组标题、再是字段')
+        check(bodyKids[bodyKids.length - 1] === 'dshsh-cfg-footer', 'body 的最后一项是页脚')
+        const note = directChild(footer, 'dshsh-cfg-note')
+        check(note !== null && note.type === 'p', '页脚提示是整行 <p>（flex:1，把按钮推到右边）')
+      }
+
+      // 只读 + 出错：两条提示都必须是**整行** <p role=status>，不能是被挤进某一列的网格子项
+      const broken = render({ status: 'ready', fields: FIELDS, note: '', writable: false, error: '设置接口返回异常' })
+      check(broken !== null, '只读+出错态渲染不抛错')
+      if (broken !== null) {
+        const body = directChild(broken, 'dshsh-cfg-body')
+        const ro = directChild(body, 'dshsh-cfg-readonly')
+        check(ro !== null && ro.type === 'p' && ro.props.role === 'status',
+          '只读提示是 body 的整行 <p role=status>')
+        const failed = directChild(directChild(body, 'dshsh-cfg-footer'), 'dshsh-cfg-failed')
+        check(failed !== null && failed.type === 'p' && failed.props.role === 'status',
+          '错误信息是页脚里的整行 <p role=status>（官方 failed 的位置）')
+        check(collectByClass(broken, 'dshsh-cfg-check').every((b) => b.props.disabled === true),
+          '只读时所有开关都 disabled')
+        check(collectByClass(broken, 'dshsh-cfg-input').every((i) => i.props.disabled === true),
+          '只读时所有输入框都 disabled')
+      }
+
+      // 有草稿：标题行出现「未保存」，收起也看得见（官方卡片同款行为）
+      const dirtyTree = render(READY, { cols: 100 })
+      check(dirtyTree !== null, '有草稿时渲染不抛错')
+      if (dirtyTree !== null) {
+        const pending = collectByClass(dirtyTree, 'dshsh-cfg-pending')[0]
+        check(pending !== undefined && pending.children.join('') === '未保存', '有草稿时标题行出现「未保存」标签')
+        const discard = collectByClass(dirtyTree, 'dshsh-cfg-discard')[0]
+        check(discard !== undefined && discard.props.disabled === false, '有草稿时「放弃改动」可点')
+        const save = collectByClass(dirtyTree, 'dshsh-cfg-save')[0]
+        check(save !== undefined && save.props.disabled === false, '有草稿且可写时「保存」可点')
       }
     }
   }

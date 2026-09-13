@@ -3,11 +3,11 @@
 > Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness — 9 model tools plus a draggable floating panel you can actually type into.
 
 [![npm version](https://img.shields.io/npm/v/dsh-agent-shell.svg)](https://www.npmjs.com/package/dsh-agent-shell)
-[![npm license](https://img.shields.io/npm/l/dsh-agent-shell.svg)](./LICENSE)
+[![npm license](https://img.shields.io/npm/l/dsh-agent-shell.svg)](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![CI](https://github.com/Mrtime-gege/dsh-agent-shell/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrtime-gege/dsh-agent-shell/actions/workflows/ci.yml)
 
-[中文（主文档）](./README.md) · **English**
+[中文（主文档）](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md) · **English**
 
 > **This plugin was developed by AI.** Design, implementation and tests were all done by an AI
 > (157 automated assertions plus real-machine verification, which found and fixed six real bugs) —
@@ -23,7 +23,7 @@
 * **There is no approval prompt.** DSH ships an approval seam (`dsh-user-approval`), but in
   `danger-full-access` — **the only mode this plugin can work in** — the platform sets its policy to
   `never` (deterministic reject, no UI). This plugin does **not** integrate that seam, so a command
-  the model runs is never offered to you for allow/reject. See [SECURITY.md](./SECURITY.md).
+  the model runs is never offered to you for allow/reject. See [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md).
 * **The only defence is a heuristic guard** (`guardDangerousCommands`, on by default): ten regexes
   matching `rm -rf /`, `mkfs`, `dd of=/dev/*`, `sudo` and friends. **Trivially bypassed** through
   concatenation, variables or script files; it also **false-positives** on innocent text. It is a
@@ -49,9 +49,22 @@ and `Ctrl-C` behave the way they do in a terminal you are sitting at.
 
 ## Requirements
 
+> ### ⚙️ DSH version compatibility (breaking update)
+>
+> This plugin **0.1.6** targets **DSH 0.1.5 (developer preview)** and is verified on it
+> (`0.1.5-rc.1`). DSH 0.1.5 is a **breaking release** (documented, dev-preview semantics):
+> the `subprocess` service now mounts **late**, after this plugin's `apply()`. Pre-0.1.5
+> plugin code that did a one-shot `ctx.get('subprocess')` in `apply()` gets `undefined`
+> and silently exits early — tools, HTTP routes and the panel all vanish with no error
+> ("plugin disappeared after upgrade" is usually this). 0.1.6 adapts: `subprocess` is a
+> declared hard dependency (`inject: ['tools', 'subprocess']`).
+>
+> **Supported version:** `DSH 0.1.5.x` (dev preview; `0.1.5-rc.1` tested). Older (≤0.1.4)
+> is not verified against this release.
+
 | Item | Version / note |
 |---|---|
-| DSH | `0.1.2-rc.1` line |
+| DSH | **0.1.5.x** (dev preview; `0.1.5-rc.1` verified) |
 | Peers | `@deepseek-ai/cordis` ^4.0.2, `dsh-tools` ^0.1.2-rc.1, `schemastery` ^3.18.0, `react` ^18.2.0 |
 | Node / tmux / OS | ≥ 20 / 3.x / Linux or macOS (WSL works) |
 | Session sandbox | **`danger-full-access` is required** — restricted modes cannot share the tmux server across calls |
@@ -113,17 +126,30 @@ Same-origin, `127.0.0.1`, **unauthenticated**: `GET /plugins/shell/{list, screen
 * Only shows shells this plugin created (it never touches your own `tmux`).
 * If the host is down for more than ~6 seconds, the orphan watchdog collects all shells.
 
+## Versions and releases
+
+* **The public history keeps version-level nodes only**: each release is **one commit** plus a
+  `v<version>` tag — intermediate steps, their granularity and commit messages are not part of it.
+* **Releases are decided by the maintainer**: pushing a `v<version>` tag is the only release trigger.
+  CI (GitHub Actions) publishes to npm via npm's Trusted Publisher (OIDC) and creates the matching
+  GitHub Release, with a provenance attestation (`npm audit signatures` can verify it).
+* **The README keeps only the latest update**; the full history lives in the Chinese docs
+  ([docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md)) and
+  [CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md).
+* **Only necessary files are published**: the npm package contains just what running and installing
+  needs (`lib/`, `cordis.patch.yml`, `install-deps.sh`, both READMEs, `LICENSE`).
+
 ## More detail
 
 | File | Contents |
 |---|---|
-| [README.md](./README.md) | 中文首页（本文档的中文主版）；含 `更新与修复记录`（每次修了什么、根因、怎么验证） |
-| [docs/使用细节.md](./docs/使用细节.md) | 配置项全表、面板/输入法细节、工具与 HTTP 参数（中文） |
-| [docs/设计与实现.md](./docs/设计与实现.md) | 解耦设计、生命周期与孤儿治理、踩坑注记、测试与发布（中文） |
-| [SECURITY.md](./SECURITY.md) | full security model: why there is no approval, unauthenticated HTTP, guard boundaries |
-| [PUBLISHING.md](./PUBLISHING.md) | release how-to (npm + GitHub, provenance, rollback; 中文) |
-| [CHANGELOG.md](./CHANGELOG.md) | per-version changes |
+| [README.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md) | 中文首页（本文档的中文主版）；含 `更新与修复记录`（每次修了什么、根因、怎么验证） |
+| [docs/使用细节.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/使用细节.md) | 配置项全表、面板/输入法细节、工具与 HTTP 参数（中文） |
+| [docs/设计与实现.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/设计与实现.md) | 解耦设计、生命周期与孤儿治理、踩坑注记、测试与发布（中文） |
+| [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md) | full security model: why there is no approval, unauthenticated HTTP, guard boundaries |
+| [PUBLISHING.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/PUBLISHING.md) | release how-to (npm + GitHub, provenance, rollback; 中文) |
+| [CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md) | per-version changes |
 
 ## License
 
-[MIT](./LICENSE) © Mrtime-gege
+[MIT](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/LICENSE) © Mrtime-gege

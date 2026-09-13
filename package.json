@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-shell",
-  "version": "0.1.5",
-  "description": "Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness (DSH): real tmux TTYs, 9 model tools, draggable floating panel",
+  "version": "0.1.6",
+  "description": "Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness (DSH): real tmux TTYs, 11 model tools, draggable floating panel",
   "author": "Mrtime-gege <327958341+Mrtime-gege@users.noreply.github.com>",
   "repository": {
     "type": "git",
@@ -25,15 +25,10 @@
   "files": [
     "lib",
     "cordis.patch.yml",
+    "install-deps.sh",
     "README.md",
     "README.en.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "SECURITY.md",
-    "PUBLISHING.md",
-    "LICENSE",
-    "docs",
-    "install-deps.sh"
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -45,10 +40,12 @@
     "check": "node --check lib/index.js && node --check lib/tmux.js && node --check lib/client.js",
     "test:client": "node scripts/test-client.mjs",
     "test:edge": "node scripts/test-edge.mjs",
-    "test": "node scripts/test-client.mjs && node scripts/test-edge.mjs",
+    "test": "node scripts/test-consent.mjs && node scripts/test-client.mjs && node scripts/test-edge.mjs",
     "release:check": "node scripts/release-check.mjs",
+    "leak:history": "node scripts/scan-history.mjs",
     "prepublishOnly": "npm run check && npm run release:check",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "test:consent": "node scripts/test-consent.mjs"
   },
   "dsh": {
     "bundle": {
