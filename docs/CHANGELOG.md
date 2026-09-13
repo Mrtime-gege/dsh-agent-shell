@@ -2,6 +2,30 @@
 
 本文件记录 `dsh-agent-shell` 的版本变化。
 
+## 0.2.0 — 工具面 v2 重构 + 稳定 id 会话身份（破坏性）
+
+- **事故复盘（2026-09-13）**：新增 `lib/pure.mjs` 后 dev-sync.sh 的 `lib/*.js` glob 漏拷
+  `.mjs` → profile 缺文件 → dsh web crash-loop。已修 glob 并加**双层免疫**：dev-sync 按
+  index.js 实际相对导入核验目标文件全在（缺则失败禁止重启）；release:check 加"相对导入
+  必须可解析"。发布管线（npm files:["lib"] 整目录）不受影响。
+
+
+- **会话身份 = 稳定 id**：tmux 会话名改为生成的内部 id（永不变），用户可见名字变成独立的
+  **label**（`@dsh-label` 会话选项，可随意改名）。一切寻址（send/read/kill/审计/归属）都以
+  id 为键 —— 用户改名**不再影响**任何操作，彻底消灭"名字被改 → 会话失联"那类隐患。
+- **工具面 v2（11 → 9 个原子工具）**：`shell_open` / `shell_run`（发命令→等空闲→收输出，
+  替代 send+sleep+read 循环）/ `shell_send` / `shell_read`（tail/screen/since 增量）/
+  `shell_wait`（条件等待）/ `shell_check`（守卫预检）/ `shell_manage`（改名/改尺寸/关闭/
+  回收）/ `shell_state`（总览，合并原 list+diagnose+consent）/ `shell_audit`。
+- **选择器统一**：session 接受单 id / 逗号分隔列表 / "mine"（本对话的）/ "*"（全部）。
+- **破坏性明确**：旧工具名（shell_history/shell_list/shell_resize/shell_close/shell_rename/
+  shell_diagnose）不再注册；`shell_consent` 保留但改为纯报告型（授权/撤销走面板或 HTTP `/consent`）；
+  升级需按新契约调用。
+- 面板寻址随 id 走；**UI（0.2.0 面板）**：shell 下拉行显示 **label（名字）+ 稳定 id + 创建它的会话**；
+  详情层与授权浮层按 DSH 设计语言重绘（`--dsw-specific-menu` 菜单面、`--dsw-elevation-prominent`
+  浮层阴影、20px 圆角、平台色底的分段控件、悬停行）；三浮层（下拉/详情/授权）**互斥**，
+  开一个自动关另外两个。
+
 ## 0.1.6 — control-mode 四十倍提速 + 权限模型 + 安全修复 + 发布卫生
 
 ### 新增

@@ -543,17 +543,43 @@ notes.push('安全告知内容（AI 开发 / 无审批 / 护栏非防护）均�
   if (!body.includes('unless the user explicitly asks')) {
     fail('归属规则缺少「除非用户明确要求」这一半 —— 只写"不要动"会拦住用户自己要求的操作')
   }
-  const listed = ['shell_list', 'shell_send', 'shell_read', 'shell_close']
+  const listed = ['shell_state', 'shell_send', 'shell_read', 'shell_manage']
   for (const tool of listed) {
     const i = body.indexOf(`name: '${tool}'`)
     const window = i === -1 ? '' : body.slice(i, i + 1200)
-    if (!/unless the user explicitly asks|do not operate on those/.test(window)) {
+    if (!/unless the user explicitly (asks|allows)|do not operate on/.test(window)) {
       fail(`${tool} 的描述里没有归属提醒（模型正要动手时最容易忽略系统提示）`)
     }
   }
   // 只有真的没问题才打这一行 —— 失败的运行里还打"在位"就是在骗人
   if (failures.length === before) {
     notes.push('归属规则在位：系统提示 + 4 个关键工具描述（可见但不可随手操作）')
+  }
+}
+
+/* ---------- 6.3b lib 内相对导入必须能解析（事故免疫：import./pure.mjs 而文件被漏同步） ----------
+ *
+ * 事故（2026-09-13）：index.js 新增 `import './pure.mjs'`，dev-sync.sh 的 glob 只拷
+ * *.js → profile 缺 pure.mjs → dsh web ERR_MODULE_NOT_FOUND crash-loop。npm 侧因
+ * files:["lib"] 整目录不受影响；这里把「每个相对导入都能在 lib/ 里找到文件」变成机械检查，
+ * 任何新增/改名模块（不管扩展名）漏文件都会当场合 fail。
+ */
+{
+  const index = join(ROOT, 'lib', 'index.js')
+  const body = existsSync(index) ? readFileSync(index, 'utf8') : ''
+  if (body === '') fail('lib/index.js 缺失，无法校验相对导入')
+  const imports = [...body.matchAll(/from '\.\/([A-Za-z0-9._-]+)(\.(js|mjs))?'/g)].map((m) => m[1])
+  if (imports.length === 0) fail('lib/index.js 里找不到相对导入（rules 变了？）')
+  const missing = imports.filter((name) => {
+    if (existsSync(join(ROOT, 'lib', name))) return false
+    if (existsSync(join(ROOT, 'lib', name + '.js'))) return false
+    if (existsSync(join(ROOT, 'lib', name + '.mjs'))) return false
+    return true
+  })
+  if (missing.length > 0) {
+    fail(`lib/ 相对导入缺文件：${missing.join(', ')}（npm files:["lib"] 会连 import 一起带，但 dev-sync/复制路径会漏）`)
+  } else {
+    notes.push(`lib/ 相对导入 ${imports.length} 个全部可解析（含 .mjs 等新扩展名）`)
   }
 }
 

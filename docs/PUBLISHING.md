@@ -555,3 +555,21 @@ python3 scripts/npm-unpublish-webotp.py --dry-run 0.1.0   # 只读预演
 ```
 
 它**不自动打开浏览器** —— 把链接打给人，人在**自己的物理机**上授权（虚拟机里往往没有通行密钥）。
+
+---
+
+## 附录：从 README 拆入的章节（2026-09，README 瘦身）
+
+### 版本与发布
+
+* **公开历史只保留版本级节点**：每个版本对应**一个提交**与一个 `v<版本>` tag —— 中间改动的过程、粒度与
+  提交信息不在公开历史里。
+* **发版由维护者决定**：推 `v<版本>` tag 是唯一的发布扳机。CI（GitHub Actions）用 npm 的
+  Trusted Publisher（OIDC）发布到 npm，并自动创建对应的 GitHub Release，附带 provenance 签名证明
+  （`npm audit signatures` 可验证）。
+* **README 只保留最近一次更新**，完整历史（每个版本改了什么、**根因**是什么、怎么验证的）在
+  [docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md)；
+  逐版本的简短发布说明在 [CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md)。
+* **只发布必要文件**：npm 包里只有运行与安装需要的条目（`lib/`、`cordis.patch.yml`、`install-deps.sh`、
+  两份 README、`LICENSE`）—— 文档类内容留在仓库，不随包发布。
+

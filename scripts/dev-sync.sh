@@ -30,8 +30,30 @@ cp -f "$SRC/cordis.patch.yml" "$DST/cordis.patch.yml" 2>/dev/null || true
 mkdir -p "$DST/lib"
 # pnpm 可能把某些文件做成硬链接，此时 cp 会报 "are the same file" —— 内容本就一样，
 # 忽略即可。
-for f in "$SRC"/lib/*.js; do
+for f in "$SRC"/lib/*.js "$SRC"/lib/*.mjs; do
   cp -f "$f" "$DST/lib/" 2>/dev/null || true
 done
+
+# ── 防复发校验（事故 2026-09-13：index.js 开始 import ./pure.mjs，而 glob 只拷 *.js，
+#     .mjs 没进 profile → dsh web 加载即 ERR_MODULE_NOT_FOUND → crash-loop）────────
+# 按 index.js **实际相对导入**逐条核验目标里存在对应文件：带扩展名按原名，
+# 不带扩展名按 ESM 语义依次试 .js/.mjs。缺任何一个 → 同步不完整，直接失败。
+MISSING_COUNT=0
+for imp in $(grep -oE "from '\./[A-Za-z0-9._-]+(\.(js|mjs))?'" "$SRC/lib/index.js" | sed "s/from '//;s/'//"); do
+  base=$(basename "$imp")
+  found=0
+  if [ -f "$DST/lib/$base" ]; then found=1
+  elif [ -f "$DST/lib/$base.js" ]; then found=1
+  elif [ -f "$DST/lib/$base.mjs" ]; then found=1
+  fi
+  if [ "$found" -ne 1 ]; then
+    echo "  ✗ profile 缺少被导入模块：$imp（$DST/lib/$base(.js|.mjs) 都不存在）" >&2
+    MISSING_COUNT=$((MISSING_COUNT + 1))
+  fi
+done
+if [ "$MISSING_COUNT" -gt 0 ]; then
+  echo "dev-sync 失败：$MISSING_COUNT 个被导入的模块未同步到目标 —— 禁止用当前 profile 重启 dsh web" >&2
+  exit 1
+fi
 
 echo "synced $SRC -> $DST"

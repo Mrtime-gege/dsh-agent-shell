@@ -1,6 +1,6 @@
 # dsh-agent-shell
 
-> Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness — 9 model tools plus a draggable floating panel you can actually type into.
+> Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness — 10 model tools plus a draggable floating panel you can actually type into.
 
 [![npm version](https://img.shields.io/npm/v/dsh-agent-shell.svg)](https://www.npmjs.com/package/dsh-agent-shell)
 [![npm license](https://img.shields.io/npm/l/dsh-agent-shell.svg)](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/LICENSE)
@@ -10,8 +10,8 @@
 [中文（主文档）](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md) · **English**
 
 > **This plugin was developed by AI.** Design, implementation and tests were all done by an AI
-> (157 automated assertions plus real-machine verification, which found and fixed six real bugs) —
-> but **no human security audit**. Factor that into your risk assessment.
+> (450+ automated assertions across five suites plus real-machine verification, which found and
+> fixed six real bugs) — but **no human security audit**. Factor that into your risk assessment.
 
 ## ⚠️ Read this first: it is a real shell, with no approval gate
 
@@ -51,12 +51,12 @@ and `Ctrl-C` behave the way they do in a terminal you are sitting at.
 
 > ### ⚙️ DSH version compatibility (breaking update)
 >
-> This plugin **0.1.6** targets **DSH 0.1.5 (developer preview)** and is verified on it
+> This plugin (**0.2.0**) targets **DSH 0.1.5 (developer preview)** and is verified on it
 > (`0.1.5-rc.1`). DSH 0.1.5 is a **breaking release** (documented, dev-preview semantics):
 > the `subprocess` service now mounts **late**, after this plugin's `apply()`. Pre-0.1.5
 > plugin code that did a one-shot `ctx.get('subprocess')` in `apply()` gets `undefined`
 > and silently exits early — tools, HTTP routes and the panel all vanish with no error
-> ("plugin disappeared after upgrade" is usually this). 0.1.6 adapts: `subprocess` is a
+> ("plugin disappeared after upgrade" is usually this). Since 0.1.6, `subprocess` is a
 > declared hard dependency (`inject: ['tools', 'subprocess']`).
 >
 > **Supported version:** `DSH 0.1.5.x` (dev preview; `0.1.5-rc.1` tested). Older (≤0.1.4)
@@ -79,12 +79,30 @@ and `Ctrl-C` behave the way they do in a terminal you are sitting at.
 dsh plugin --profile web add dsh-agent-shell    # or file:/path/to/dsh-agent-shell
 ```
 
-`dsh plugin add` reads this package's `dsh.bundle.patch` and writes the name into
-`dsh.profile.bundles` for you. Restart `dsh web` once.
+`dsh plugin add` reads this package's `cordis.patch.yml` and writes the bundle patch into
+the profile composition for you. Restart `dsh web` once.
 
 > ⚠️ Do **not** also insert a patch row by hand: the bundled patch already inserts `id: agent-shell`,
 > and the id may only appear once — a duplicate makes `dsh web` fail at startup with
 > `duplicate loader entry id: agent-shell`.
+
+## Recent changes (0.2.0)
+
+* **Identity = stable id.** The tmux session name is a generated id that never changes; the
+  display name is a separable `label` (`@dsh-label` session option) you can rename freely. All
+  addressing (send/read/run/kill/audit/ownership) keys on the id, so renaming can never orphan a
+  shell. Legacy tool names (`shell_history/list/resize/close/rename/diagnose`) are gone.
+* **Tool surface (10 atomic tools)**: the `shell_*` set above, with a unified `session` selector
+  (single id / comma list / `mine` / `*`).
+* **Real-machine fixes**: nested-tmux foreground race fixed via `/proc` process-tree detection;
+  dev-sync/release:check now machine-check that every imported module ships (postmortem of a
+  `.mjs` copy gap that crash-looped `dsh web`); zero-dependency `lib/pure.mjs` extraction with a
+  dedicated pure test suite.
+* **Panel UI refined**: dropdown rows show name (label) + creator + stable id per shell; the
+  header trigger shows the same two-line identity; collapsed pill prefers the label; the info and
+  consent popovers were redrawn in DSH's design language; the three popovers (picker/info/consent)
+  are mutually exclusive. Verified with two shells doing 10 nested `ssh → Windows host → wsl → Kali`
+  round-trips each (20 live ssh processes), left alive on request.
 
 ## Panel & tools
 
@@ -96,13 +114,18 @@ view (default 200 lines, "more" doubles up to 5000).
 | Tool | Parameters (★ = required) | Purpose |
 |---|---|---|
 | `shell_open` | `name?` `cols?` `rows?` `cwd?` | create a shell, return its first screen (`cwd` that doesn't exist errors out instead of silently landing elsewhere) |
+| `shell_run` | ★`session` `command` | send a command, wait until it settles, return only the new output |
 | `shell_send` | ★`session` `text?` `preKeys?` `keys?` `confirm?` `settleMs?` | type like a human: `preKeys` → `text` → `keys` |
-| `shell_read` / `shell_history` | ★`session` (`lines?`) | visible screen / scrollback |
-| `shell_list` | — | list shells with metrics |
-| `shell_resize` | ★`session` ★`cols` ★`rows` | resize (clamped to 20–1000 × 5–500) |
-| `shell_rename` | ★`session` ★`newName` | rename (sanitized, `dsh-` prefix added) |
-| `shell_close` | ★`session` | close (idempotent: already-gone is success with `closed:false`) |
-| `shell_diagnose` | — | server / watchdog / cwd / **approval status** |
+| `shell_read` | ★`session` `lines?` `mode?` | tail / screen / history / since-incremental |
+| `shell_wait` | ★`session` `until?` `timeout?` | wait until idle / a command / a regex match |
+| `shell_check` | ★`session` `command` | preview the guard verdict without sending |
+| `shell_manage` | ★`session` `action` | rename (label only) / resize / close / reap |
+| `shell_state` | `session?` | one-glance state: id, label, fg, size, buffer, owner; plus server/watchdog/tmux/approval/consent lines |
+| `shell_audit` | — | read the audit trail (inputs, guard verdicts, owner, actor) |
+| `shell_consent` | ★`action` | gate status / grant / revoke by conversation |
+
+Every tool addresses shells by their **stable id** (`session`); `name` on `shell_open` is just a
+display label that can be renamed without affecting addressing.
 
 Field names differ on purpose: only `shell_open` takes `name`; every other tool takes **`session`**
 (required in the schema). HTTP request bodies use `name`.
@@ -113,8 +136,11 @@ shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "ke
 
 ## HTTP endpoints
 
-Same-origin, `127.0.0.1`, **unauthenticated**: `GET /plugins/shell/{list, screen, diagnose}`,
-`POST /plugins/shell/{keys, new, kill, resize, rename}`.
+Same-origin, `127.0.0.1`, **unauthenticated**:
+`GET /plugins/shell/{list, screen, audit, consent, settings, diagnose, debugctl}`,
+`POST /plugins/shell/{keys, new, kill, resize, rename}`; `/consent` and `/settings` also accept
+writes (POST). All write requests must be JSON (`content-type: application/json`), enforced by
+the browser-side fence.
 
 ## Known limits
 

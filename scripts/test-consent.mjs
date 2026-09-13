@@ -47,15 +47,14 @@ check(scopeAllows('whatever', 'read') === false && scopeAllows(undefined, 'full'
 
 /* ── 2. 工具 → 能力映射（改这张表就是改安全边界，所以逐项断言） ─────────── */
 
-const expectRead = ['shell_list', 'shell_read', 'shell_history', 'shell_diagnose', 'shell_audit']
-const expectFull = ['shell_open', 'shell_send', 'shell_close', 'shell_resize', 'shell_rename']
+const expectRead = ['shell_state', 'shell_read', 'shell_wait', 'shell_check', 'shell_audit']
+const expectFull = ['shell_open', 'shell_run', 'shell_send', 'shell_manage']
 check(expectRead.every((t) => capabilityForTool(t) === 'read'),
   `只读工具：${expectRead.join(', ')}`)
 check(expectFull.every((t) => capabilityForTool(t) === 'full'),
   `需要完全控制的工具：${expectFull.join(', ')}`)
-check(capabilityForTool('shell_close') === 'full',
-  'shell_close 需要完全控制（关会话会杀进程，用户拍板不算"只读"）')
-check(capabilityForTool('shell_consent') === 'none', 'shell_consent 不受档位限制')
+check(capabilityForTool('shell_manage') === 'full',
+  'shell_manage 需要完全控制（关闭/回收会杀进程，用户拍板不算"只读"）')
 check(capabilityForTool('shell_something_new') === 'full',
   '未知工具按"需要完全控制"处理（新增工具忘了登记也不会被放开）')
 

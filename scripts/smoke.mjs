@@ -218,7 +218,7 @@ mod.apply(ctx, {
   extendedKeys: true, auditDir: join(root, 'audit'),
 })
 
-check(tools.size === 11, `注册工具数 = ${tools.size}（期望 11）`)
+check(tools.size === 10, `注册工具数 = ${tools.size}（期望 10——v2 工具面）`)
 check(routes.size === 11, `注册 HTTP 路由数 = ${routes.size}（期望 11）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
@@ -237,7 +237,8 @@ check(conf.includes('extended-keys on'), 'extendedKeys: true 已写进服务端�
 
 const opened = await run('shell_open', { name: 'smoke', cols: 90, rows: 24 })
 const session = (opened.match(/session (\S+)/) ?? [])[1]
-check(session === 'dsh-smoke', `shell_open → ${session}`)
+check(/^dsh-[a-z0-9]+$/.test(session) && String(opened).includes('(dsh-smoke)'),
+  `shell_open → id=${session} label=dsh-smoke（寻址用 id）`)
 
 await run('shell_send', { session, text: 'echo SMOKE-$((6*7))', keys: ['Enter'], settleMs: 500 })
 let read = await run('shell_read', { session })
@@ -252,31 +253,34 @@ await new Promise(r => setTimeout(r, 900))
 read = await call(`/screen?name=${session}&lines=40`, 'GET')
 check(read.body?.screen?.includes('HTTP-42'), 'HTTP 路径（请求体用 name）同样可用')
 
-const hist = await run('shell_history', { session, lines: 60 })
-check(hist.includes('SMOKE-42'), 'shell_history 能读到滚出屏幕的内容')
+const hist = await run('shell_read', { session, mode: 'history', lines: 60 })
+check(hist.includes('SMOKE-42'), 'shell_read history 能读到滚出屏幕的内容')
 
-const listed = await run('shell_list', {})
-check(listed.includes('dsh-smoke'), 'shell_list 列出该会话')
+const listed = await run('shell_state', { scope: '*' })
+check(listed.includes('dsh-smoke'), 'shell_state 列出该会话（label=dsh-smoke）')
 
-const renamed = await run('shell_rename', { session, newName: 'renamed' })
-check(renamed.includes('dsh-renamed'), `shell_rename → ${renamed.trim()}`)
+const renamed = await run('shell_manage', { action: 'rename', session, newName: 'renamed' })
+check(renamed.includes('dsh-renamed'), `shell_manage rename → ${renamed.trim()}`)
 
-const resized = await run('shell_resize', { session: 'dsh-renamed', cols: 100, rows: 30 })
-check(resized.length > 0, 'shell_resize 有返回')
+const resized = await run('shell_manage', { action: 'resize', session, cols: 100, rows: 30 })
+check(resized.length > 0, 'shell_manage resize 有返回')
 
-check((await run('shell_diagnose', {})).length > 0, 'shell_diagnose 有输出')
+check((await run('shell_state', { scope: '*' })).length > 0, 'shell_state 有输出')
 
 const created = await call('/new', 'POST', { name: 'http', cols: 80, rows: 24 })
-check(created.code === 200 && created.body?.name === 'dsh-http', `POST /new → ${created.code} ${created.body?.name}`)
+check(created.code === 200 && /^dsh-[a-z0-9]+$/.test(String(created.body?.name ?? '')),
+  `POST /new → ${created.code} id=${created.body?.name}（label=dsh-http）`)
 
 const list = await call('/list', 'GET')
 check(list.body?.sessions?.length === 2, `GET /list → ${list.body?.sessions?.length} 个会话`)
 
-const viaHttp = await call('/rename', 'POST', { name: 'dsh-http', newName: 'http2' })
-check(viaHttp.body?.name === 'dsh-http2', `POST /rename → ${viaHttp.body?.name ?? JSON.stringify(viaHttp.body)}`)
+const viaHttp = await call('/rename', 'POST', { name: created.body.name, newName: 'http2' })
+check(viaHttp.body?.name === created.body.name && viaHttp.body?.label === 'dsh-http2',
+  `POST /rename 只改 label：id=${viaHttp.body?.name} label=${viaHttp.body?.label}`)
 
-check((await run('shell_close', { session: 'dsh-renamed' })).includes('closed'), 'shell_close 生效')
-check((await run('shell_close', { session: 'dsh-http2' })).includes('closed'), 'shell_close 第二个会话')
+check((await run('shell_manage', { action: 'close', session })).includes('closed'), 'shell_manage close 生效')
+check((await run('shell_manage', { action: 'close', session: created.body.name })).includes('closed'),
+  'shell_manage close 第二个会话')
 
 /* ---------- 生命周期保护 ---------- */
 
@@ -328,14 +332,14 @@ check(boot.adopted === false && boot.kept.length >= 1, `bootstrap 报告保住�
 check(kept.body?.sessions?.length === 1, `pid 文件指向别的 harness 时，会话仍在（${kept.body?.sessions?.length} 个）`)
 if (hasHarness) check(boot.watchdogPid !== '', `重新布防了看门狗：pid ${boot.watchdogPid}`)
 else console.log('  · 无 harness 祖先，跳过「看门狗已重新布防」断言（布防本就无法进行）')
-await run('shell_close', { session: 'dsh-keepme' })
+await run('shell_manage', { action: 'close', session: keepmeId })
 
 // (3) 看门狗静默死亡 → 下一次操作必须自愈重布防（节流窗口 5 秒，故先等过去）
 if (hasHarness) {
   await driver.disarmWatchdog()
   check(await driver.watchdogPid() === '', '看门狗已停掉（模拟静默死亡）')
   await new Promise(r => setTimeout(r, 5200))
-  await run('shell_list', {})
+  await run('shell_state', { scope: '*' })
   await new Promise(r => setTimeout(r, 1000))
   const rearmed = await driver.watchdogPid()
   check(rearmed !== '', `自愈生效：看门狗重新布防为 pid ${rearmed || '(无)'}`)

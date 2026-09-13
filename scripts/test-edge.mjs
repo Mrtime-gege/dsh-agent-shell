@@ -43,6 +43,15 @@ const { check, rejects, report } = makeChecker()
 
 const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s => s.name)
 
+/** v2：label → 稳定 id（/list 里有 label 字段）。tests 里的“已知名字”一律经它解析，
+ *  地址永远用 id —— 这正是 0.2.0 的关键契约。同名 label 多于一 → 全列出（调用方自辨）。 */
+const idOf = async (label, callFn) => {
+  const want = String(label).startsWith('dsh-') ? label : `dsh-${label}`
+  const rows = (await (callFn ?? call)('/list', 'GET')).body.sessions
+  const hits = rows.filter((s) => s.label === want)
+  return hits.length === 1 ? hits[0].name : (hits.length > 1 ? hits.map((s) => s.name).join(',') : 'MISSING-' + want)
+}
+
 /* ── 1. 会话命名 ──────────────────────────────────────────────────────────── */
 
 {
@@ -55,29 +64,35 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(/^[A-Za-z0-9_-]+$/.test(name), `名字只含 tmux 认的字符（无点号/冒号）：${name}`)
   check((opened.split('|')[1] ?? '').includes('x'), 'shell_open 返回尺寸')
 
-  // rename 与 open 必须用同一套净化规则：用同一个输入，两边结果应当一致
-  const renamed = await run('shell_rename', { session: name, newName: 'other.x/y z' })
-  const renamedTo = (renamed.match(/-> (\S+)/) ?? [])[1]
-  check(renamedTo === 'dsh-other-x-y-z', `rename 净化：'other.x/y z' → ${renamedTo}`)
+  // rename 只改 **label**：id（tmux 会话名）必须原封不动 —— "寻址不被改名动摇"的根基。
+  // （v2：open 返回的 `session <id>` 是稳定 id；`name` 参数与 rename 的 newName 都是 label。）
+  const renamed = await run('shell_manage', { action: 'rename', session: name, newName: 'other.x/y z' })
+  const labelAfter = (renamed.match(/label → (\S+)/) ?? [])[1]
+  check(labelAfter === 'dsh-other-x-y-z', `rename 净化 label：'other.x/y z' → ${labelAfter ?? '(未解析)'}`)
+  check(renamed.includes(`id stays ${name}`), `label 变了但 id 不变：${renamed.trim()}`)
   const realNames2 = tmux(['list-sessions', '-F', '#{session_name}']).trim().split('\n').filter(Boolean)
-  check(realNames2.includes(renamedTo), `rename 后名字同样 = tmux 真实名字：${realNames2.join(', ')}`)
-  const back = await run('shell_rename', { session: renamedTo, newName: 'other.x/y z' })
+  check(realNames2.includes(name), `改名后 tmux 会话名（id）原样在：${realNames2.join(', ')}`)
+  const back = await run('shell_manage', { action: 'rename', session: name, newName: 'other.x/y z' })
   check(back.includes('unchanged'), `重复改名到同一净化结果 → 不变更：${back.trim()}`)
-  const name2 = renamedTo
+  const name2 = name
 
-  // 重名 → 自动加后缀
+  // 同名 label 允许重复；**id 各自唯一**（v2 起没有"重名自动加后缀"——名字只是显示）
   const dup = await run('shell_open', { name: 'dupname' })
   const dupFirst = (dup.match(/session (\S+)/) ?? [])[1]
   const dup2 = await run('shell_open', { name: 'dupname' })
   const dupName = (dup2.match(/session (\S+)/) ?? [])[1]
-  check(dupFirst === 'dsh-dupname' && dupName === 'dsh-dupname-2', `重名自动后缀：${dupFirst} / ${dupName}`)
+  check(dupFirst !== dupName && dupFirst.length > 0 && dupName.length > 0,
+    `同名 label 的两个会话各有独立 id：${dupFirst} / ${dupName}`)
   const bothReal = tmux(['list-sessions', '-F', '#{session_name}']).trim().split('\n')
-  check(bothReal.includes(dupFirst) && bothReal.includes(dupName), `两个同名会话都真实存在：${bothReal.join(', ')}`)
-  await run('shell_close', { session: name2 })
-  await run('shell_close', { session: dupName })
-  await run('shell_close', { session: dupFirst })
+  check(bothReal.includes(dupFirst) && bothReal.includes(dupName), `两个会话都真实存在：${bothReal.join(', ')}`)
+  const dupLabels = (await call('/list', 'GET')).body.sessions.filter((s) => s.name === dupFirst || s.name === dupName)
+  check(dupLabels.length === 2 && dupLabels.every((s) => s.label === 'dsh-dupname'),
+    '两个会话的 label 都是 dsh-dupname（label 允许重复，寻址仍按 id）')
+  await run('shell_manage', { action: 'close', session: name2 })
+  await run('shell_manage', { action: 'close', session: dupName })
+  await run('shell_manage', { action: 'close', session: dupFirst })
   // 再关一次同一个会话：必须幂等（面板列表稍旧时用户就会这么点）
-  const twice = await run('shell_close', { session: dupFirst }).catch(e => `THREW:${e.message}`)
+  const twice = await run('shell_manage', { action: 'close', session: dupFirst }).catch(e => `THREW:${e.message}`)
   check(!String(twice).startsWith('THREW') && /already gone|closed/i.test(String(twice)),
     `重复关闭同一会话是幂等的：${String(twice).slice(0, 70)}`)
   const twiceHttp = await call('/kill', 'POST', { name: dupName })
@@ -91,17 +106,18 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   // 荒谬尺寸必须被夹到上限，而不是把 tmux 的 `width too large` 原样丢出来
   const huge = await run('shell_open', { name: 'huge', cols: 100000, rows: 50000 }).catch(e => `THREW:${e.message}`)
   check(!String(huge).startsWith('THREW'), `超大尺寸不再抛 tmux 原始错误：${String(huge).slice(0, 70)}`)
+  const hugeId = (huge.match(/session (\S+)/) ?? [])[1]
   const zoomed = await call('/list', 'GET')
-  const hugeSession = zoomed.body.sessions.find(s => s.name === 'dsh-huge')
+  const hugeSession = zoomed.body.sessions.find(s => s.name === hugeId)
   check(hugeSession?.cols === 1000 && hugeSession?.rows === 500,
     `超大尺寸被夹到上限 1000x500：${hugeSession?.cols}x${hugeSession?.rows}`)
-  await run('shell_close', { session: 'dsh-huge' })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-huge') })
 
   const tiny = await run('shell_open', { name: 'tiny', cols: -5, rows: 0 })
   const tinyName = (tiny.match(/session (\S+)/) ?? [])[1]
   const listed = (await call('/list', 'GET')).body.sessions.find(s => s.name === tinyName)
   check(listed.cols >= 20 && listed.rows >= 5, `负/零尺寸被夹到下限：${listed.cols}x${listed.rows}`)
-  await run('shell_close', { session: tinyName })
+  await run('shell_manage', { action: 'close', session: tinyName })
 
   // tmux 对不存在的 -c 不报错、只会静默回落到 home（会让返回的 cwd 变成假信息）
   await rejects(() => run('shell_open', { name: 'badcwd', cwd: '/nonexistent-dsh-test-dir' }),
@@ -118,11 +134,11 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
 {
   await rejects(() => run('shell_send', { session: 'dsh-nope', text: 'x' }), 'shell_send 不存在的会话 → 报错', 'no such session')
   await rejects(() => run('shell_read', { session: 'dsh-nope' }), 'shell_read 不存在的会话 → 统一报错', 'no such session')
-  await rejects(() => run('shell_history', { session: 'dsh-nope' }), 'shell_history 不存在的会话 → 统一报错', 'no such session')
-  await rejects(() => run('shell_resize', { session: 'dsh-nope', cols: 80, rows: 24 }), 'shell_resize 不存在的会话 → 统一报错', 'no such session')
-  await rejects(() => run('shell_rename', { session: 'dsh-nope', newName: 'x' }), 'shell_rename 不存在的会话 → 报错', 'no such session')
+  await rejects(() => run('shell_read', { session: 'dsh-nope', mode: 'history', lines: 200 }), 'shell_history 不存在的会话 → 统一报错', 'no such session')
+  await rejects(() => run('shell_manage', { action: 'resize', session: 'dsh-nope', cols: 80, rows: 24 }), 'shell_resize 不存在的会话 → 统一报错', 'no such session')
+  await rejects(() => run('shell_manage', { action: 'rename', session: 'dsh-nope', newName: 'x' }), 'shell_rename 不存在的会话 → 报错', 'no such session')
   await rejects(() => run('shell_send', {}), 'shell_send 缺 session → 参数校验拦下', 'session')
-  await rejects(() => run('shell_rename', { session: 'dsh-nope', newName: '!!!' }), 'shell_rename 名字全是非法字符 → 报错', 'letter')
+  await rejects(() => run('shell_manage', { action: 'rename', session: 'dsh-nope', newName: '!!!' }), 'shell_rename 名字全是非法字符 → 报错', 'letter')
 
   // 参数类型垃圾：不应该抛出未捕获异常，也不应该真的动到 tmux
   const junk = await run('shell_send', { session: 'dsh-nope', text: 12345, keys: 'Enter' }).catch(e => `THREW:${e.message}`)
@@ -133,7 +149,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
 
 {
   await run('shell_open', { name: 'content', cols: 100, rows: 30 })
-  const name = 'dsh-content'
+  const name = await idOf('dsh-content')
 
   // 空发送：不应报错也不应产生副作用
   const empty = await run('shell_send', { session: name, text: '', preKeys: [], keys: [] })
@@ -162,15 +178,15 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(!String(sent).startsWith('THREW'), `长文本不抛异常：${String(sent).slice(0, 60)}`)
 
   // 历史读取的边界参数
-  const hist0 = await call('/screen?name=dsh-content&lines=0', 'GET')
+  const hist0 = await call(`/screen?name=${name}&lines=0`, 'GET')
   check(hist0.code === 200, `lines=0 不报错 → ${hist0.code}`)
-  const histNeg = await call('/screen?name=dsh-content&lines=-5', 'GET')
+  const histNeg = await call(`/screen?name=${name}&lines=-5`, 'GET')
   check(histNeg.code === 200, `lines=-5 不报错 → ${histNeg.code}`)
-  const histHuge = await call('/screen?name=dsh-content&lines=999999999', 'GET')
+  const histHuge = await call(`/screen?name=${name}&lines=999999999`, 'GET')
   check(histHuge.code === 200 && typeof histHuge.body.screen === 'string',
     `lines=999999999 不致命（返回 ${String(histHuge.body.screen).length} 字符）`)
 
-  await run('shell_close', { session: name })
+  await run('shell_manage', { action: 'close', session: name })
 }
 
 /* ── 4.5 服务端刚退出的竞态：关掉最后一个 shell 后立刻开新的 ──────────────────── */
@@ -178,18 +194,18 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
 {
   const last = await run('shell_open', { name: 'lastone' })
   const lastName = (last.match(/session (\S+)/) ?? [])[1]
-  await run('shell_close', { session: lastName })
+  await run('shell_manage', { action: 'close', session: lastName })
   // 最后一个会话结束 → tmux 服务端自行退出；紧接着建会话就是那条 50% 失败的竞态
   const again = await run('shell_open', { name: 'after-idle' }).catch(e => `THREW:${e.message}`)
   check(!String(again).startsWith('THREW'), `服务端刚退出后立刻建会话成功：${String(again).slice(0, 60)}`)
-  await run('shell_close', { session: 'dsh-after-idle' })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-after-idle') })
 }
 
 /* ── 5. 高危命令护栏 ───────────────────────────────────────────────────────── */
 
 {
   await run('shell_open', { name: 'guard', cols: 90, rows: 24 })
-  const name = 'dsh-guard'
+  const name = await idOf('dsh-guard')
 
   const dangerous = [
     ['rm -rf /', '递归删根'],
@@ -275,7 +291,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(String(pendingRefusal).includes("shell's pending input line"),
     '拒绝信息如实说明是在「待提交输入行」里发现的（本次 text 只有一个 "/"，不可能来自它）')
 
-  await run('shell_close', { session: name })
+  await run('shell_manage', { action: 'close', session: name })
 }
 
 /* ── 5.5 回退扫屏的前提：只有前台确实是 shell 时，屏幕最后一行才是"待提交的命令" ──
@@ -295,12 +311,13 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   const fakePrompt = join(tmpdir(), `dsh-fake-prompt-${process.pid}.sh`)
   writeFileSync(fakePrompt, "#!/bin/sh\nprintf '[sudo] password for user: '\nexec sleep 30\n", { mode: 0o700 })
   try {
-    await hPrompt.run('shell_open', { name: 'prompt', cols: 90, rows: 24 })
-    await hPrompt.run('shell_send', { session: 'dsh-prompt', text: `sh ${fakePrompt}`, keys: ['Enter'], settleMs: 1000 })
-    const listed = String(await hPrompt.run('shell_list', {}))
+    const openedPrompt = String(await hPrompt.run('shell_open', { name: 'prompt', cols: 90, rows: 24 }))
+    const promptId = (openedPrompt.match(/session (\S+)/) ?? [])[1]
+    await hPrompt.run('shell_send', { session: promptId, text: `sh ${fakePrompt}`, keys: ['Enter'], settleMs: 1000 })
+    const listed = String(await hPrompt.run('shell_state', { scope: '*' }))
     const fg = (/fg=(\S+)/.exec(listed) ?? [])[1] ?? '?'
     check(fg === 'sleep', `前台确实不是 shell（实到 fg=${fg}）—— 否则下面那条断言证明不了任何事`)
-    const typing = String(await hPrompt.run('shell_send', { session: 'dsh-prompt', text: 's3cret', keys: ['Enter'] }))
+    const typing = String(await hPrompt.run('shell_send', { session: promptId, text: 's3cret', keys: ['Enter'] }))
     check(!typing.includes('REFUSED'),
       `密码提示下输入密码不被拦（修复前：REFUSED，理由写着 "Detected in the line about to be submitted: [sudo] password for user:"）→ ${typing.slice(0, 60)}`)
 
@@ -312,21 +329,22 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     let pAudit = ''
     try { pAudit = readFileSync(join(hPrompt.pkgDir, '..', 'audit', `audit-${pDay}.jsonl`), 'utf8') } catch { pAudit = '' }
     const pInputs = pAudit.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
-      .filter((e) => e.event === 'input' && e.shell === 'dsh-prompt' && e.result === 'sent')
+      .filter((e) => e.event === 'input' && e.shell === promptId && e.result === 'sent')
     check(pInputs.some((e) => e.text === '[redacted:password]'),
       `非 shell 前台的输入原文脱敏入库（找到 [redacted:password] 条目）`)
     // (2) 非 shell 前台但屏幕**不是**密码提示 → 输入照常入审计（不脱敏）。
     //     这一条是精修的回归网：旧判据"按前台一刀切，非 shell 一律脱敏"会把 ssh/wsl
     //     远端会话的**正常命令**（wsl / vim / python3 …）整段误杀成 [redacted:password]，
     //     实机长流程测试当场暴露。判据改为"屏幕末行出现 password:"（真正不回显的场景）。
-    await hPrompt.run('shell_open', { name: 'plain', cols: 80, rows: 24 })
-    await hPrompt.run('shell_send', { session: 'dsh-plain', text: 'sleep 30', keys: ['Enter'], settleMs: 900 })
-    await hPrompt.run('shell_send', { session: 'dsh-plain', text: 'echo keep-me', keys: ['Enter'], settleMs: 300 })
+    const openedPlain = String(await hPrompt.run('shell_open', { name: 'plain', cols: 80, rows: 24 }))
+    const plainId = (openedPlain.match(/session (\S+)/) ?? [])[1]
+    await hPrompt.run('shell_send', { session: plainId, text: 'sleep 30', keys: ['Enter'], settleMs: 900 })
+    await hPrompt.run('shell_send', { session: plainId, text: 'echo keep-me', keys: ['Enter'], settleMs: 300 })
     await new Promise((r) => setTimeout(r, 300))
     let plainAudit = ''
     try { plainAudit = readFileSync(join(hPrompt.pkgDir, '..', 'audit', `audit-${pDay}.jsonl`), 'utf8') } catch { plainAudit = '' }
     const plainSent = plainAudit.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
-      .filter((e) => e.event === 'input' && e.shell === 'dsh-plain' && e.result === 'sent')
+      .filter((e) => e.event === 'input' && e.shell === plainId && e.result === 'sent')
     check(plainSent.some((e) => e.text === 'echo keep-me'),
       '非密码提示的前台输入照常入审计（不会误杀远端会话的命令）')
     check(!pInputs.some((e) => e.text === 's3cret'),
@@ -349,7 +367,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
  */
 {
   const ownerOf = async (name) => {
-    const listed = String(await run('shell_list', {}))
+    const listed = String(await run('shell_state', { scope: '*' }))
     const row = listed.split('\n').find((line) => line.includes(name)) ?? ''
     return (/owner=(\S*)/.exec(row) ?? [])[1] ?? '(no-row)'
   }
@@ -359,25 +377,25 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(ownerBefore !== 'unknown' && ownerBefore !== '(no-row)', `建会话时归属已记录（owner=${ownerBefore || '(空)'}）`)
 
   // ① 纯中文名：tmux 本身完全支持（实测建会话 / send-keys -t / capture-pane -t / rename-session 都正常）
-  const cjk = String(await run('shell_rename', { session: 'dsh-rn1', newName: '测试会话' }))
-  check(cjk.includes('-> dsh-测试会话'), `纯中文名可用：${cjk.trim()}`)
-  const listedCjk = String(await run('shell_list', {}))
+  const cjk = String(await run('shell_manage', { action: 'rename', session: await idOf('dsh-rn1'), newName: '测试会话' }))
+  check(cjk.includes('label → dsh-测试会话'), `纯中文名可用：${cjk.trim()}`)
+  const listedCjk = String(await run('shell_state', { scope: '*' }))
   check(listedCjk.includes('dsh-测试会话'), '中文名在 shell_list 里原样出现（UI 显示的名字 = tmux 真实名字）')
 
   // ② 中英混合：不能再吃掉中文
-  const mixed = String(await run('shell_rename', { session: 'dsh-测试会话', newName: '构建log2' }))
-  check(mixed.includes('-> dsh-构建log2'), `中英混合名保住中文：${mixed.trim()}`)
+  const mixed = String(await run('shell_manage', { action: 'rename', session: await idOf('dsh-测试会话'), newName: '构建log2' }))
+  check(mixed.includes('label → dsh-构建log2'), `中英混合名保住中文：${mixed.trim()}`)
   check(!mixed.includes('sanitized'), '没有被净化改写时，不谎报"名字被改过"')
 
   // 真的需要净化时（空格/斜杠）必须**说出来** —— 静默换名比报错更难发现
-  const lossy = String(await run('shell_rename', { session: 'dsh-构建log2', newName: 'a b/c' }))
-  check(lossy.includes('-> dsh-a-b-c'), `不安全字符仍被折叠：${lossy.trim()}`)
+  const lossy = String(await run('shell_manage', { action: 'rename', session: await idOf('dsh-构建log2'), newName: 'a b/c' }))
+  check(lossy.includes('label → dsh-a-b-c'), `不安全字符仍被折叠：${lossy.trim()}`)
   check(lossy.includes('sanitized'), '净化改写了输入时如实告知（而不是拿着 200 就当改成功了）')
 
   // `.` 与 `:` 必须折掉：tmux 会把它们**自己归一成 `_`**（实测 a.b 与 a:b 撞成同一个 a_b），
   // 留着会让"UI 显示的名字"与"真实名字"对不上，之后按名字定位就找不到会话
-  const dotted = String(await run('shell_rename', { session: 'dsh-a-b-c', newName: 'x.y:z' }))
-  check(dotted.includes('-> dsh-x-y-z'), `tmux 目标语法的分隔符被折掉：${dotted.trim()}`)
+  const dotted = String(await run('shell_manage', { action: 'rename', session: await idOf('dsh-a-b-c'), newName: 'x.y:z' }))
+  check(dotted.includes('label → dsh-x-y-z'), `tmux 目标语法的分隔符被折掉：${dotted.trim()}`)
 
   // 归属必须跟着搬家（连带 captureFile —— 它决定输出上限还执不执行）
   const ownerAfter = await ownerOf('dsh-x-y-z')
@@ -401,7 +419,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
       renameEvents = lines.filter((line) => {
         try {
           const e = JSON.parse(line)
-          return e.event === 'rename' && /^dsh-(测试会话|构建log2|a-b-c|x-y-z)$/.test(String(e.shell ?? ''))
+          return e.event === 'rename' && /^dsh-(测试会话|构建log2|a-b-c|x-y-z)$/.test(String(e.label ?? ''))
         } catch { return false }
       }).length
     } catch { renameEvents = -1 }
@@ -409,7 +427,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   }
   check(renameEvents >= 4, `四次改名都进了审计流水（实到 ${renameEvents} 条；改动前是 0 条）`)
 
-  await run('shell_close', { session: 'dsh-x-y-z' })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-x-y-z') })
 
   // ③ 面板侧：失焦必须是**提交**而不是取消（行为要在浏览器里才看得见，这里钉住源码）
   const clientSrc3 = readFileSync(join(h.pkgDir, 'lib', 'client.js'), 'utf8')
@@ -429,7 +447,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   await rejects(() => run('shell_open', { name: 'cap4' }), '超过 maxSessions(3) → 拒绝', 'limit')
   const viaHttp = await call('/new', 'POST', { name: 'cap5' })
   check(viaHttp.code >= 400, `HTTP /new 同样受上限约束 → ${viaHttp.code}`)
-  for (const s of await sessions()) await run('shell_close', { session: s })
+  for (const s of await sessions()) await run('shell_manage', { action: 'close', session: s })
 }
 
 /* ── 7. HTTP 层的畸形输入 ──────────────────────────────────────────────────── */
@@ -491,14 +509,14 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   list = (await call('/list', 'GET')).body.server
   check(list.maxSessions === 1, `服务端信息里的 maxSessions 已更新为 ${list.maxSessions}`)
   check(String(list.settings.note).includes('立即生效'), `立刻生效类改动如实报告：${list.settings.note}`)
-  await run('shell_close', { session: 'dsh-within-limit' })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-within-limit') })
 
   // 2) 需重启项：historyLimit 写进 tmux 启动配置，必须明说「要重启」
   h.changeSettings({ maxSessions: 3, historyLimit: 12345 })
   list = (await call('/list', 'GET')).body.server
   check(String(list.settings.note).includes('重启') && String(list.settings.note).includes('historyLimit'),
     `需重启类改动如实报告：${list.settings.note}`)
-  const diagText2 = await run('shell_diagnose', {})
+  const diagText2 = await run('shell_state', { scope: '*' })
   check(diagText2.includes('settings namespace: dsh-agent-shell'), 'shell_diagnose 也报告设置来源')
 
   // 3) 组合配置本身越界时：设置页注册失败，但要**如实告知**、且插件照常工作
@@ -513,7 +531,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     '服务挂载 ≠ 注册成功，两者分别报告')
   check(String(badList.settings.note).includes('设置页未注册') && String(badList.settings.note).includes('shell'),
     `失败原因如实写进面板：${badList.settings.note}`)
-  const stillWorks = await h2.run('shell_list', {})
+  const stillWorks = await h2.run('shell_state', { scope: '*' })
   check(String(stillWorks).includes('session') || String(stillWorks).length > 0,
     `设置页不可用时插件照常工作（shell_list 仍可用）`)
   h2.cleanup()
@@ -657,7 +675,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   try { rmSync(marker, { force: true }) } catch { /* 忽略 */ }
 
   const attack = await call('/keys', 'POST',
-    { name: 'dsh-fence-test', text: `touch ${marker}`, keys: ['Enter'] },
+    { name: await idOf('dsh-fence-test'), text: `touch ${marker}`, keys: ['Enter'] },
     { 'sec-fetch-site': 'cross-site' })
   check(attack.code === 403, `跨站 POST /keys 被拒绝 → HTTP ${attack.code}`)
   await new Promise((r) => setTimeout(r, 600))
@@ -665,12 +683,12 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
 
   // 反向对照：同样的请求、只去掉攻击头 → 必须成功并真的执行。
   // 没有这一步就无法证明「是闸门挡下的」而不是「命令本身没跑起来」。
-  const legit = await call('/keys', 'POST', { name: 'dsh-fence-test', text: `touch ${marker}`, keys: ['Enter'] })
+  const legit = await call('/keys', 'POST', { name: await idOf('dsh-fence-test'), text: `touch ${marker}`, keys: ['Enter'] })
   check(legit.code === 200, `同样的请求去掉攻击头就放行 → HTTP ${legit.code}`)
   await new Promise((r) => setTimeout(r, 800))
   check(existsSync(marker), `放行的那次**真的执行了**（${marker} 已创建）—— 反向对照成立`)
   try { rmSync(marker, { force: true }) } catch { /* 忽略 */ }
-  await run('shell_close', { session: 'dsh-fence-test' })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-fence-test') })
 
   // 面板要能看见闸门形态与被拒记录（否则「面板突然打不开」无从查起）
   const fenced = (await call('/list', 'GET')).body.server
@@ -678,7 +696,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     `闸门形态如实上报：${JSON.stringify(fenced.fence)}`)
   check(Array.isArray(fenced.fenceBlocked) && fenced.fenceBlocked.length >= 1,
     `被拒请求有记录可查：${JSON.stringify(fenced.fenceBlocked.slice(-1))}`)
-  const diagFence = await run('shell_diagnose', {})
+  const diagFence = await run('shell_state', { scope: '*' })
   check(diagFence.includes('浏览器面闸门'), 'shell_diagnose 报告闸门状态')
 }
 
@@ -752,9 +770,9 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     .then(() => null).catch((e) => e)
   check(bad !== null && String(bad.message).includes('no such directory'),
     `对话目录不存在时明确报错（不静默落到别处）：${String(bad?.message).slice(0, 50)}`)
-  await hCwd.run('shell_close', { session: 'dsh-cwd-conv' }, withConv)
-  await hCwd.run('shell_close', { session: 'dsh-cwd-explicit' }, withConv)
-  await hCwd.call('/kill', 'POST', { name: 'dsh-cwd-fallback' })
+  await hCwd.run('shell_manage', { action: 'close', session: await idOf('dsh-cwd-conv', hCwd.call) }, withConv)
+  await hCwd.run('shell_manage', { action: 'close', session: await idOf('dsh-cwd-explicit', hCwd.call) }, withConv)
+  await hCwd.call('/kill', 'POST', { name: await idOf('dsh-cwd-fallback', hCwd.call) })
   hCwd.cleanup()
 }
 
@@ -804,10 +822,11 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     tgz, peersDir, socket: `${SOCKET}-caret`,
     config: { watchdog: false, __consentMode: 'ok' },
   })
-  await hCaret.run('shell_open', { name: 'caret' })
+  const caretOpened = String(await hCaret.run('shell_open', { name: 'caret' }))
+  const caretId = (caretOpened.match(/session (\S+)/) ?? [])[1]
   await new Promise((r) => setTimeout(r, 500))
 
-  const fresh = await hCaret.call('/screen?name=dsh-caret&lines=200', 'GET')
+  const fresh = await hCaret.call(`/screen?name=${caretId}&lines=200`, 'GET')
   check(fresh.code === 200, `读屏幕 → HTTP ${fresh.code}`)
   const lines = String(fresh.body.screen ?? '').split('\n')
   const pane = Number(fresh.body.meta?.paneHeight ?? 0)
@@ -820,10 +839,10 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     `光标行号可换算（${lineIndex}）—— 修复前这里是 ${2 - pane + cursorY}，负数 → 不画光标`)
 
   // 工具路径相反：它要的是干净文本，不该拖一堆空行给模型看
-  const read = String(await hCaret.run('shell_read', { session: 'dsh-caret' }))
+  const read = String(await hCaret.run('shell_read', { session: caretId }))
   check(!/\n\s*\n\s*$/.test(read), 'shell_read 仍然裁掉结尾空行（工具输出保持干净）')
 
-  await hCaret.run('shell_close', { session: 'dsh-caret' })
+  await hCaret.run('shell_manage', { action: 'close', session: caretId })
   hCaret.cleanup()
 }
 
@@ -847,14 +866,14 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     '并指出唯一出路是让用户在面板改档位')
   check(hRead.consent.asks.length === 1, '而且只问了这一次（没有因为被挡就重问）')
 
-  const listed = await attempt(hRead, 'shell_list', {})
+  const listed = await attempt(hRead, 'shell_state', { scope: '*' })
   check(listed.ok === true, '只读档可以列 shell（读能力允许）')
   const readMissing = await attempt(hRead, 'shell_read', { session: 'dsh-nope' })
   check(readMissing.ok === false && !/需要「完全控制/.test(readMissing.message),
     `只读档的 shell_read 能穿过能力门（这里只是会话不存在）：${readMissing.message.slice(0, 44)}`)
   const sendInRead = await attempt(hRead, 'shell_send', { session: 'x', text: 'echo hi', keys: ['Enter'] })
   check(sendInRead.ok === false && /需要「完全控制/.test(sendInRead.message), '只读档不能输入')
-  const closeInRead = await attempt(hRead, 'shell_close', { session: 'x' })
+  const closeInRead = await attempt(hRead, 'shell_manage', { action: 'close', session: 'x' })
   check(closeInRead.ok === false && /需要「完全控制/.test(closeInRead.message),
     '只读档也不能关闭会话（关会话会杀进程，用户拍板不算只读）')
   hRead.cleanup()
@@ -868,7 +887,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(openInDeny.ok === false && /完全禁止/.test(openInDeny.message),
     `完全禁止档下 shell_open 直接被挡住：${openInDeny.message.slice(0, 40)}`)
   check(/不再询问/.test(openInDeny.message), '并说明"之后不再询问"（这是持久的别再问）')
-  const listInDeny = await attempt(hDeny, 'shell_list', {})
+  const listInDeny = await attempt(hDeny, 'shell_state', { scope: '*' })
   check(listInDeny.ok === false && /完全禁止/.test(listInDeny.message), '完全禁止档连列 shell 都被挡住')
   const stillQueryable = await attempt(hDeny, 'shell_consent', {})
   check(stillQueryable.ok === true && /consent gate: enabled/.test(stillQueryable.value),
@@ -882,7 +901,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   })
   await attempt(hCooldown, 'shell_open', { name: 'cd-1' })
   const asksAfterFirst = hCooldown.consent.asks.length
-  const second = await attempt(hCooldown, 'shell_list', {})
+  const second = await attempt(hCooldown, 'shell_state', { scope: '*' })
   check(hCooldown.consent.asks.length === asksAfterFirst,
     `冷却期内**没有再弹窗**（第一次问了 ${asksAfterFirst} 次，第二次调用没有新增）`)
   hCooldown.cleanup()
@@ -985,7 +1004,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   const freshExec = { agent: { session: { id: 'pconsent-brand-new' } } }
   await hBtn.run('shell_open', { name: 'pconsent-a' }, freshExec)
   check(hBtn.consent.asks.length === 0, '主动授权后，新对话第一次用工具也不再被问（这正是该按钮的目的）')
-  await hBtn.run('shell_close', { session: 'pconsent-a' }, freshExec)
+  await hBtn.run('shell_manage', { action: 'close', session: await idOf('pconsent-a', hBtn.call) }, freshExec)
 
   const listConsent = (await hBtn.call('/list', 'GET')).body.server.consent
   check(listConsent !== undefined && listConsent.allowAll === true,
@@ -999,7 +1018,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   const afterExec = { agent: { session: { id: 'pconsent-after-revoke' } } }
   await hBtn.run('shell_open', { name: 'pconsent-b' }, afterExec)
   check(hBtn.consent.asks.length === 1, '撤销后新对话重新开始询问（立刻生效，不是重启才生效）')
-  await hBtn.run('shell_close', { session: 'pconsent-b' }, afterExec)
+  await hBtn.run('shell_manage', { action: 'close', session: await idOf('pconsent-b', hBtn.call) }, afterExec)
 
   hBtn.cleanup()
 }
@@ -1022,7 +1041,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   await hConsent2.run('shell_open', { name: 'qconsent' })
   const after = await hConsent2.run('shell_consent', {})
   check(String(after).includes('granted: yes'), `授权后再查显示已授权：${String(after).split('\n')[2]}`)
-  await hConsent2.run('shell_close', { session: 'dsh-qconsent' })
+  await hConsent2.run('shell_manage', { action: 'close', session: await idOf('dsh-qconsent', hConsent2.call) })
   // 工具描述里必须写明"别频繁查" —— 这条措辞是行为约束的一部分，用断言钉住
   const desc = String(tools.get('shell_consent')?.description ?? '')
   check(desc.includes('Do NOT call this routinely'), '工具描述里明确写了「不要例行调用」')
@@ -1045,7 +1064,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   // 1) 第一次用 → 恰好问一次，且问题必须说清"授权的是任意命令"
   const before = h.consent.asks.length
   const opened = await run('shell_open', { name: 'consent-a' })
-  check(String(opened).includes('session dsh-consent-a'), `确认后正常开会话：${String(opened).split('\n')[0]}`)
+  check(String(opened).includes('(dsh-consent-a)'), `确认后正常开会话：${String(opened).split('\n')[0]}`)
   check(h.consent.asks.length === before + 1, `第一次调用恰好问了一次（${h.consent.asks.length - before} 次）`)
   const asked = h.consent.asks[h.consent.asks.length - 1]
   const q = asked.questions[0]
@@ -1066,16 +1085,16 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   check(asked.agent !== undefined, '提问带上了发起 agent（DSH 用它判断能不能向人类提问）')
 
   // 2) 同一个对话再用 → 不再问（否则会烦到用户，等于没做门）
-  await run('shell_send', { session: 'dsh-consent-a', text: 'echo ok', keys: ['Enter'] })
+  await run('shell_send', { session: await idOf('dsh-consent-a', hFirst.call), text: 'echo ok', keys: ['Enter'] })
   await run('shell_open', { name: 'consent-a2' })
   check(h.consent.asks.length === before + 1, `同对话后续调用不再询问（仍是 ${h.consent.asks.length - before} 次）`)
 
   // 3) 面板是人自己操作：不问他"允不允许自己"，但要留痕
   const panelBefore = h.consent.asks.length
-  const panelKeys = await call('/keys', 'POST', { name: 'dsh-consent-a', text: 'echo human', keys: ['Enter'] })
+  const panelKeys = await call('/keys', 'POST', { name: await idOf('dsh-consent-a', hFirst.call), text: 'echo human', keys: ['Enter'] })
   check(panelKeys.code === 200 && h.consent.asks.length === panelBefore, '面板（人）路径不过门、也不产生提问')
-  await run('shell_close', { session: 'dsh-consent-a' })
-  await run('shell_close', { session: 'dsh-consent-a2' })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-consent-a', hFirst.call) })
+  await run('shell_manage', { action: 'close', session: await idOf('dsh-consent-a2', hFirst.call) })
 
   // 4) **拒绝**必须真的挡住：不能只是回一句话，shell 也不许建出来
   const hDeny = await makeHarness({
@@ -1115,9 +1134,9 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     config: { watchdog: false, requireConsent: false },
   })
   const offOpened = await hOff.run('shell_open', { name: 'off-shell' })
-  check(String(offOpened).includes('session dsh-off-shell') && hOff.consent.asks.length === 0,
+  check(String(offOpened).includes('(dsh-off-shell)') && hOff.consent.asks.length === 0,
     'requireConsent=false 时不提问（但要用户自己显式关）')
-  await hOff.run('shell_close', { session: 'dsh-off-shell' })
+  await hOff.run('shell_manage', { action: 'close', session: await idOf('dsh-off-shell', hOff.call) })
   hOff.cleanup()
 
   // 8) 授权要落盘：换一个新 harness（相同审计目录）不该再问一次 —— 热重载/重启后同理
@@ -1133,8 +1152,8 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   await hShared2.run('shell_open', { name: 'shared-b' })
   check(asksAfterFirst === 1 && hShared2.consent.asks.length === 0,
     `授权落盘后新实例不再重复问（第一个 harness 问了 ${asksAfterFirst} 次，第二个 ${hShared2.consent.asks.length} 次）`)
-  await hShared1.run('shell_close', { session: 'dsh-shared-a' })
-  await hShared2.run('shell_close', { session: 'dsh-shared-b' })
+  await hShared1.run('shell_manage', { action: 'close', session: await idOf('dsh-shared-a', hShared1.call) })
+  await hShared2.run('shell_manage', { action: 'close', session: await idOf('dsh-shared-b', hShared2.call) })
   hShared1.cleanup(); hShared2.cleanup()
 
   // 9) 授权决策本身要进审计（谁问的、谁答的、答了什么）
@@ -1169,24 +1188,25 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
 
   // 1) 模型路径：开 shell（带 cwd）→ 发命令 → 关掉；每一步都要留痕
   const opened = await run('shell_open', { name: 'audit-model', cwd: '/tmp' }, EXEC)
-  check(String(opened).includes('session dsh-audit-model'), `开了审计用会话：${String(opened).split('\n')[0]}`)
-  await run('shell_send', { session: 'dsh-audit-model', text: 'echo audit-marker-555', keys: ['Enter'] }, EXEC)
+  const auditId = (String(opened).match(/session (\S+)/) ?? [])[1]
+  check(String(opened).includes('(dsh-audit-model)'), `开了审计用会话（label=dsh-audit-model, id=${auditId}）：${String(opened).split('\n')[0]}`)
+  await run('shell_send', { session: auditId, text: 'echo audit-marker-555', keys: ['Enter'] }, EXEC)
   await settle()
 
   const lines = readLines().slice(mark)
-  const openRec = lines.find((r) => r.event === 'open' && r.shell === 'dsh-audit-model')
+  const openRec = lines.find((r) => r.event === 'open' && r.shell === auditId)
   check(openRec !== undefined, '开了会话 → 记下 open 事件')
   check(openRec !== undefined && openRec.source === 'tool' && openRec.actor === ACTOR,
     `open 记录了来源与发起者（模型侧必须带上会话 id）：source=${openRec?.source} actor=${openRec?.actor}`)
   check(openRec !== undefined && openRec.captureFile !== undefined && String(openRec.captureFile).includes('output'),
     `open 记录了留痕文件路径：${openRec?.captureFile}`)
 
-  const inputRec = lines.find((r) => r.event === 'input' && r.shell === 'dsh-audit-model')
+  const inputRec = lines.find((r) => r.event === 'input' && r.shell === auditId)
   check(inputRec !== undefined && inputRec.text === 'echo audit-marker-555', `模型输入被记下：${JSON.stringify(inputRec?.text)}`)
   check(inputRec !== undefined && inputRec.guard === 'allowed' && inputRec.source === 'tool', `记下了护栏决策与来源：guard=${inputRec?.guard} source=${inputRec?.source}`)
 
   // 2) 面板路径：人的键击同样留痕（这是修复前完全查不到的那一半）
-  const panelSend = await call('/keys', 'POST', { name: 'dsh-audit-model', text: 'echo panel-typed', keys: ['Enter'] })
+  const panelSend = await call('/keys', 'POST', { name: await idOf('dsh-audit-model'), text: 'echo panel-typed', keys: ['Enter'] })
   check(panelSend.code === 200, `面板发键 → HTTP ${panelSend.code}`)
   await settle()
   const panelRec = readLines().filter((r) => r.event === 'input' && r.source === 'panel').pop()
@@ -1194,7 +1214,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     `面板输入也留痕，来源标注为 panel：${JSON.stringify({ actor: panelRec?.actor, text: panelRec?.text })}`)
 
   // 3) 被护栏拦下也是一次**企图** —— 只记成功的审计等于把最该看的藏起来
-  const refused = await call('/keys', 'POST', { name: 'dsh-audit-model', text: 'rm -rf /', keys: ['Enter'] })
+  const refused = await call('/keys', 'POST', { name: await idOf('dsh-audit-model'), text: 'rm -rf /', keys: ['Enter'] })
   check(refused.code === 409, `高危命令被护栏拦下 → HTTP ${refused.code}`)
   await settle()
   const refusedRec = readLines().filter((r) => r.event === 'input' && r.guard === 'refused').pop()
@@ -1208,39 +1228,40 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   const captured = captureFile !== '' && existsSync(captureFile) ? readFileSync(captureFile, 'utf8') : ''
   check(captured.includes('audit-marker-555') && captured.includes('panel-typed'),
     '留痕内容包含两个标记（模型发的与面板发的都在终端里留了痕）')
-  await run('shell_close', { session: 'dsh-audit-model' })
+  await run('shell_manage', { action: 'close', session: auditId })
   await settle()
   check(existsSync(captureFile), `关掉会话后留痕文件依然在（${existsSync(captureFile) ? (await outputSizeOf(captureFile)) + 'B' : '已丢失'}）`)
-  check(readLines().some((r) => r.event === 'close' && r.shell === 'dsh-audit-model'), '关闭会话也留痕')
+  check(readLines().some((r) => r.event === 'close' && r.shell === auditId), '关闭会话也留痕')
 
   // 5) 归属标注（D1：只标注、不拦截）：shell_list 必须显示 owner，其他人仍能操作
-  const listed = await run('shell_list', {})
-  await run('shell_open', { name: 'audit-owned' }, EXEC)   // 带发起者：归属才有的可查
-  const listed2 = await run('shell_list', {})
-  check(String(listed2).includes('owner='), `shell_list 显示归属：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
+  const listed = await run('shell_state', { scope: '*' })
+  const ownedOpened = await run('shell_open', { name: 'audit-owned' }, EXEC)   // 带发起者：归属才有的可查
+  const ownedId = (String(ownedOpened).match(/session (\S+)/) ?? [])[1]
+  const listed2 = await run('shell_state', { scope: '*' })
+  check(String(listed2).includes('owner='), `shell_state 显示归属：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
   await settle()
-  const ownerRec = readLines().filter((r) => r.event === 'open' && r.shell === 'dsh-audit-owned').pop()
+  const ownerRec = readLines().filter((r) => r.event === 'open' && r.shell === ownedId).pop()
   check(ownerRec !== undefined && ownerRec.actor !== '', '归属来自发起者的会话 id（面板建的则标 panel）')
   check(String(listed2).includes(`owner=${ACTOR}`),
     `归属值来自真实发起者的会话 id（不是猜的）：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
   // 插件之外建的会话（同 socket 上手工开的）必须如实标 unknown，而不是猜一个看起来像答案的值
   tmux(['new-session', '-d', '-s', 'dsh-outside', '-x', '80', '-y', '24'])
   await new Promise((r) => setTimeout(r, 300))
-  const listed3 = await run('shell_list', {})
+  const listed3 = await run('shell_state', { scope: '*' })
   check(String(listed3).includes('dsh-outside') && /dsh-outside[^\n]*owner=unknown/.test(String(listed3)),
     `插件之外建的会话如实标 unknown：${String(listed3).split('\n').find((l) => l.includes('dsh-outside'))}`)
   tmux(['kill-session', '-t', 'dsh-outside'])
   // 非 owner 依然可操作 —— D1 是标注而非隔离，这里把这条**刻意**钉住，避免以后被误改成拦截
-  const crossSend = await call('/keys', 'POST', { name: 'dsh-audit-owned', text: 'echo cross-actor-ok', keys: ['Enter'] })
+  const crossSend = await call('/keys', 'POST', { name: ownedId, text: 'echo cross-actor-ok', keys: ['Enter'] })
   check(crossSend.code === 200, `D1 只标注不拦截：别人（面板）照样能操作该会话 → HTTP ${crossSend.code}`)
-  await run('shell_close', { session: 'dsh-audit-owned' })
+  await run('shell_manage', { action: 'close', session: ownedId })
 
   // 6) 查询面：工具与 HTTP 都能读回审计
-  const auditText = await run('shell_audit', { session: 'dsh-audit-model', lines: 20 })
+  const auditText = await run('shell_audit', { session: auditId, lines: 20 })
   check(String(auditText).includes('audit dir:') && String(auditText).includes('audit-marker-555'),
     `shell_audit 能查回输入记录：${String(auditText).split('\n').slice(0, 2).join(' | ')}`)
   check(String(auditText).includes('output transcripts:'), 'shell_audit 同时报告留痕文件')
-  const auditHttp = await call('/audit?name=dsh-audit-model&lines=50', 'GET')
+  const auditHttp = await call(`/audit?name=${auditId}&lines=50`, 'GET')
   check(auditHttp.code === 200 && auditHttp.body.enabled === true && Array.isArray(auditHttp.body.records),
     `GET /audit 可用（${auditHttp.body.records?.length} 条记录）`)
   check((auditHttp.body.records ?? []).some((r) => r.summary.includes('audit-marker-555')), '/audit 返回可读摘要')
@@ -1265,14 +1286,16 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     config: { watchdog: false, captureMaxBytes: 4096 },
   })
   const capOpen = await h4.call('/new', 'POST', { name: 'cap-test' })
-  check(capOpen.code === 200, `留痕上限测试：会话已建 → HTTP ${capOpen.code}`)
+  const capId = capOpen.body.name   // v2：/new 返回的是稳定 id（label=cap-test）
+  check(capOpen.code === 200 && typeof capId === 'string' && capId.length > 0,
+    `留痕上限测试：会话已建 → HTTP ${capOpen.code} id=${capId}`)
   // 灌出一大段输出把留痕撑过 4 KiB
-  await h4.call('/keys', 'POST', { name: 'dsh-cap-test', text: 'for i in $(seq 1 400); do echo capfiller-$i; done', keys: ['Enter'] })
+  await h4.call('/keys', 'POST', { name: capId, text: 'for i in $(seq 1 400); do echo capfiller-$i; done', keys: ['Enter'] })
   await new Promise((r) => setTimeout(r, 1200))
-  await h4.call('/screen?name=dsh-cap-test', 'GET')   // 上限检查挂在轮询上
+  await h4.call(`/screen?name=${capId}`, 'GET')   // 上限检查挂在轮询上
   await new Promise((r) => setTimeout(r, 400))
   const capInfo = (await h4.call('/list', 'GET')).body.server.audit
-  check(capInfo.captureStopped.includes('dsh-cap-test'),
+  check(capInfo.captureStopped.includes(capId),
     `留痕触顶后被停止（captureStopped=${JSON.stringify(capInfo.captureStopped)}）—— 不设上限会悄悄吃满磁盘`)
   const capDay = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()
@@ -1294,8 +1317,8 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     check(/do not operate on it/.test(text), '规则是"不要操作"，而不只是"注意归属"')
     check(/unless the user/i.test(text) && /explicitly asks/i.test(text),
       '并且留出"用户明确要求"的例外 —— 否则会拦住用户自己要求的操作')
-    check(/shell_list/.test(text) && /owner/.test(text),
-      '说明可见性（shell_list 会列出所有会话的 shell）与 owner 字段的关系')
+    check(/shell_state/.test(text) && /owner/.test(text),
+      '说明可见性（shell_state 会列出所有会话的 shell）与 owner 字段的关系')
   }
   const section = h.systemPromptContexts[0]
   check(section !== undefined && section.name === 'agent-shell:usage', `段落名 = ${section ? section.name : '(无)'}`)
@@ -1306,7 +1329,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     ['sudo', '列出真正需要交互式 TTY 的场景'],
     ['explicitly asks', '说明「用户明确要求」时才用'],
     ['Do not open a shell casually', '禁止随手开 shell'],
-    ['shell_close', '要求用完关掉，别留空闲 shell'],
+    ['shell_manage', '要求用完关掉，别留空闲 shell'],
     ['does not ask', '如实说明不经过审批'],
     ['heuristic speed bump', '如实说明护栏不是安全网'],
   ]) {
@@ -1317,9 +1340,9 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   const desc = (name) => String(h.tools.get(name)?.description ?? '')
   check(desc('shell_open').includes('ONLY') && desc('shell_open').includes('ordinary command-line tools'),
     'shell_open 描述里写明「仅在必要时使用」')
-  check(desc('shell_close').includes('idle shells'), 'shell_close 描述里提醒关掉空闲 shell')
-  check(desc('shell_send').includes('Only for shells this plugin owns'), 'shell_send 描述里限定适用范围')
-  check(desc('shell_list').includes('before closing'), 'shell_list 描述里提示可用于判断是否还需要')
+  check(desc('shell_manage').includes('idle shells'), 'shell_manage 描述里提醒关掉空闲 shell')
+  check(desc('shell_send').includes('Only send to shells'), 'shell_send 描述里限定适用范围')
+  check(desc('shell_state').includes('before closing'), 'shell_state 描述里提示可用于判断是否还需要')
 }
 
 /* ── 8. 生命周期与自愈（本文件只做不依赖 harness 的部分）──────────────────── */
@@ -1354,7 +1377,7 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
   }
 
   // shell_diagnose 走工具路径，能拿到会话 —— 必须报出会话级策略与来源
-  const diagText = await run('shell_diagnose', {})
+  const diagText = await run('shell_state', { scope: '*' })
   check(diagText.includes('approval: NOT INTEGRATED'),
     'shell_diagnose 明说未接入审批、命令不会询问')
   check(/approval policy: (never|ask) \((session-override|deployment-default)\)/.test(diagText),
@@ -1373,57 +1396,8 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
  */
 
 {
-  const { drillForeground, readDescendantProcs, TmuxDriver } = await import(join(h.pkgDir, 'lib', 'tmux.js'))
-  check(typeof drillForeground === 'function' && typeof readDescendantProcs === 'function',
-    'drillForeground / readDescendantProcs 已导出（纯函数才能离线穷举）')
-
-  /** 造一棵进程表：{ pid: [comm, ...children] } */
-  const tree = (spec) => {
-    const m = new Map()
-    for (const [pid, [comm, ...children]] of Object.entries(spec)) m.set(pid, { comm, children })
-    return m
-  }
-
-  check(drillForeground('sudo', '1', tree({ 1: ['bash', '2'], 2: ['sudo', '3'], 3: ['bash', []] })) === 'bash',
-    'sudo -i → 报出里面的 root shell（改动前恒为 sudo，idle 判定整段失效）')
-  check(drillForeground('sudo', '1', tree({ 1: ['bash', '2'], 2: ['sudo', '3'], 3: ['-bash', []] })) === '-bash',
-    '登录 shell 的 -bash 形态也认，且原样返回（不做归一化改写）')
-  check(drillForeground('sudo', '1', tree({ 1: ['bash', '2'], 2: ['sudo', '3'], 3: ['vim', []] })) === 'vim',
-    'sudo vim → 报 vim（真正持有终端的是它）')
-  check(drillForeground('su', '1', tree({ 1: ['zsh', '2'], 2: ['su', '3'], 3: ['sh', []] })) === 'sh',
-    'su 同样钻穿（包装器不止 sudo 一个）')
-  check(drillForeground('pkexec', '1', tree({ 1: ['bash', '2'], 2: ['pkexec', '3'], 3: ['bash', []] })) === 'bash',
-    'pkexec 同样钻穿')
-  // 刻意**不**钻的：子进程在别的机器/命名空间里，本地树里根本没有那个 shell
-  check(drillForeground('ssh', '1', tree({ 1: ['bash', '2'], 2: ['ssh', '3'], 3: ['bash', []] })) === 'ssh',
-    'ssh → 仍报 ssh（远端提示符无法判定，报"就绪"会是假的）')
-  check(drillForeground('wsl', '1', tree({ 1: ['bash', '2'], 2: ['wsl', '3'], 3: ['bash', []] })) === 'wsl',
-    'wsl 不在包装器表里：钻进去会把"进了另一个系统"误报成本地 shell 就绪')
-  // 不确定的情形一律保守退回原值（等于改动前的行为，不会更糟）
-  check(drillForeground('sudo', '1', tree({ 1: ['bash', '2'], 2: ['sudo', '3', '4'], 3: ['bash', []], 4: ['cat', []] })) === 'sudo',
-    '包装器有多个子进程时不猜（sudo bash -c "a | b" 这种），退回原值')
-  check(drillForeground('sudo', '1', tree({ 1: ['bash', '2'], 2: ['sudo', []] })) === 'sudo', '包装器没有子进程时退回原值')
-  check(drillForeground('bash', '1', tree({ 1: ['bash', []] })) === 'bash', '空闲 shell 原样返回')
-  check(drillForeground('vim', '1', tree({ 1: ['bash', '2'], 2: ['vim', []] })) === 'vim', '普通前台程序原样返回')
-  // 同名后代有多个时取**最深**的那个（离终端最近）
-  check(drillForeground('bash', '1', tree({ 1: ['bash', '2'], 2: ['sudo', '3'], 3: ['bash', []] })) === 'bash',
-    '同名后代取最深（不会停在最外层那个 bash 上）')
-  // 退化路径：读不到进程表（非 Linux / 进程刚退出）必须退回原值，不抛错也不返回空
-  check(drillForeground('sudo', '1', null) === 'sudo', '进程表为 null → 退回原值')
-  check(drillForeground('sudo', '1', new Map()) === 'sudo', '进程表为空 → 退回原值')
-  check(drillForeground('sudo', '999', tree({ 1: ['bash', '2'], 2: ['sudo', []] })) === 'sudo', 'pane_pid 不在表里 → 退回原值')
-  check(drillForeground('', '1', tree({ 1: ['bash', []] })) === '', '空命令名 → 空串（上层据此显示 unknown）')
-  check(drillForeground('sudo', '1', tree({ 1: ['sudo', '2'], 2: ['sudo', '1'] })) === 'sudo', '进程表有环时终止（不无限循环）')
-
-  // 真读一次 /proc：本测试进程自己
-  const selfProcs = await readDescendantProcs(String(process.pid))
-  check(selfProcs.has(String(process.pid)), 'readDescendantProcs 读到了自己的进程表')
-  const selfComm = selfProcs.get(String(process.pid))?.comm ?? ''
-  check(selfComm !== '', `comm 读出来了：${selfComm || '(空)'}`)
-  check(drillForeground(selfComm, String(process.pid), selfProcs) === selfComm, '无包装器时真实进程表上也返回原命令名')
-  const badProcs = await readDescendantProcs('not-a-pid')
-  check(badProcs instanceof Map && badProcs.size === 0, 'pid 非法 → 空表（不抛错）')
-
+  // 纯逻辑穷举（drillForeground 15 例 / 回复归一化 3 例 / /proc 树读取 3 例）
+  // 已并入 scripts/test-pure.mjs（tmux.js 零 DSH 依赖、秒级离线跑）—— 瘦身边界单体。
   // 成本约束：这条路径每次 send/read 都会走，多一次 spawn 就是每次 +60~70ms
   const tmuxSrc2 = readFileSync(join(h.pkgDir, 'lib', 'tmux.js'), 'utf8')
   check(tmuxSrc2.includes('#{pane_current_command}${SEP}#{pane_pid}'),
@@ -1535,6 +1509,29 @@ const sessions = async () => (await call('/list', 'GET')).body.sessions.map(s =>
     await ctlDriver.send('ctl-a', 'sleep 25', ['Enter'])
     await new Promise((r) => setTimeout(r, 1600))
     check((await ctlDriver.foregroundOf('ctl-a')) === 'sleep', 'control 前台探测：跑 sleep 时报 sleep')
+
+    // 4b) 嵌套 tmux：前台进程组在"外层 bash ↔ 嵌套 attach 客户端"之间真·赛跑，
+    //     pane_current_command 只是随机采样 —— 判定必须走 /proc 进程树（稳定），
+    //     否则面板忙闲点、守卫扫屏、shell_run 等待都会被采样带偏。
+    //     实机取证：同一客户端同一命令同时刻曾给出 bash 与 tmux 两个值。
+    //     ⚠ 上一步刚发过 `sleep 25`，前台还占着 —— 先打断并等回空闲，否则命令会被 sleep 吞掉
+    await ctlDriver.send('ctl-a', '', ['C-c'])
+    for (let i = 0; i < 20; i += 1) {
+      const fgNow = await ctlDriver.foregroundOf('ctl-a')
+      if (/^-?(bash|sh|zsh|dash)$/.test(fgNow)) break
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    await ctlDriver.send('ctl-a', 'unset TMUX; tmux new-session -d -s nestT bash; unset TMUX; tmux attach -t nestT', ['Enter'])
+    await new Promise((r) => setTimeout(r, 1800))
+    const nestFg1 = await ctlDriver.foregroundOf('ctl-a')
+    const nestFg2 = await ctlDriver.foregroundOf('ctl-a')
+    check(nestFg1 === 'tmux' && nestFg2 === 'tmux',
+      `嵌套 tmux：前台稳定判 busy（两次：${nestFg1}/${nestFg2}）—— 赛跑采样不上当`)
+    // 退出嵌套：杀掉嵌套会话（attach 客户端随之退出），回到空闲 shell
+    await ctlDriver.send('ctl-a', 'unset TMUX; tmux kill-session -t nestT', ['Enter'])
+    await new Promise((r) => setTimeout(r, 1200))
+    check(/^-?(bash|sh|zsh|dash)$/.test((await ctlDriver.foregroundOf('ctl-a')) || ''),
+      '退出嵌套后前台回到空闲 shell（嵌套判定不会卡住 busy）')
 
     // 5) 发送走 control：单引号 / 美元符 / 双引号要**原样进终端**（tmuxQuote 语义实测）。
     //    ⚠ 这些字符拼不成合法命令（撇号会开一个未闭合的单引号，把 bash 带进 `>` 续行
