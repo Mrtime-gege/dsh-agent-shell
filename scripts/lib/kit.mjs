@@ -222,10 +222,18 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
           { header: { id: 'other-conv', createdAt: 2, origin: 'subagent', delegationDepth: 1 }, live: true, persisted: true },
           { header: { id: 'idle-conv', createdAt: 1, origin: undefined }, live: false, persisted: true },
         ],
+        // ⚠ 照真实契约：value.title 是 SessionTitleSnapshot 对象（{ title: string, ... }），
+        // 不是字符串。桩早先写成字符串 —— 正是它让"字段读错"的 bug 逃过了测试。
         readTitleSnapshots: async (ids) => (Array.isArray(ids) ? ids : []).map((id) => ({
           sessionId: id,
           status: 'fulfilled',
-          value: { title: id === String(config.__actor ?? 'test-session') ? '我的对话' : '其它会话' },
+          value: {
+            session: { id },
+            title: {
+              title: id === String(config.__actor ?? 'test-session') ? '我的对话' : '其它会话',
+              eventSeq: 1, updatedAt: 1, messageSeqs: [], source: 'auto',
+            },
+          },
         })),
       }
     : undefined

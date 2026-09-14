@@ -9,13 +9,15 @@
 
 [中文（主文档）](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md) · **English**
 
-> **This plugin was developed by AI.** Design, implementation and tests were all done by an AI
-> (450+ automated assertions across five suites plus real-machine verification, which found and
-> fixed six real bugs) — but **no human security audit**. Factor that into your risk assessment.
+## Declarations (read these three, then decide)
 
-## ⚠️ Read this first: it is a real shell, with no approval gate
+1. **This plugin was developed by AI, with no human audit.** Design and implementation came from an AI, backed by 450+ automated assertions across five suites plus real-machine verification (which found and fixed six real bugs) — but **no human security audit**.
+2. **A grant means arbitrary commands.** There is **no approval gate**: once a conversation is granted, its AI can read files, rewrite config, make network calls, install and delete things **with your own user privileges**, and nothing will prompt you.
+3. **It only provides convenient access — not responsibility for the outcome.** It is not a sandbox and not a restricted tool; whether to use it, how far, and what to back up first is your call and your risk.
 
-**This is not a sandbox and not a restricted tool. Installing it hands a real machine's terminal to an AI.**
+> Details on what it does and does not stop: [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md).
+
+## Safety boundaries
 
 * **The model can run arbitrary commands.** The `shell_*` tools drive a real `bash` inside a real
   tmux session, **with your own user privileges** — read files, rewrite config, make network calls,
