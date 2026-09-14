@@ -109,11 +109,23 @@ DSH 内置的行式命令工具每次调用都是**新进程、没有 TTY** —�
 （`@deepseek-ai/*` 由 DSH 的模块代理提供，本包声明为 optional peer，不会被重复安装）。
 唯一要留意的是**权限预设需为 `danger-full-access`**（受限沙箱下 tmux 服务端无法跨调用共享）。
 
+> ### 🐧 支持平台：仅 Linux（含 WSL2 / 容器）
+>
+> **本插件只支持 Linux**，不支持 macOS / Windows 原生 —— 这不是"还没适配"，而是核心机制本身就
+> 依赖 Linux：
+> · `tmux`（持久化 shell 的本体）只有 Unix 生态，Windows 原生没有；
+> · 嵌套 tmux 的前台判定读 `/proc/<pid>` 进程树（Linux 专有）；
+> · 看门狗用 `systemd-run --user --scope`（systemd 专有）；
+> · 审计目录加锁用 `chattr +a`（Linux 专有）。
+>
+> macOS 即使装了 tmux，`/proc`、systemd、`chattr` 三项也缺 —— 属**未测试、不保证**；
+> Windows 请在 **WSL2** 里运行 DSH（那里就是 Linux，完全可用）。
+
 **需要你（或 AI）单独安装的只有一个系统依赖：**
 
 | 依赖 | 为什么需要 | 怎么装 |
 |---|---|---|
-| **tmux ≥ 3.x**（3.6b 上验证） | 持久化 shell 的本体；没有它插件完全不能用 | `./install-deps.sh --yes`（自动识别发行版），或 `apt install tmux` / `brew install tmux`；**Windows 请在 WSL 里运行 DSH**（原生 Windows 没有 tmux） |
+| **tmux ≥ 3.x**（3.6b 上验证） | 持久化 shell 的本体；没有它插件完全不能用 | `./install-deps.sh --yes`（自动识别发行版），或 `apt install tmux`；**仅 Linux**（Windows 请用 WSL2，macOS 不受支持） |
 
 > 不想手工检查就用脚本：`./install-deps.sh --check` 只读体检、给出确切安装命令；
 > `./install-deps.sh --yes` 装上缺的。缺 tmux 时插件自身也会说清楚（启动日志、`shell_state`、
@@ -195,6 +207,19 @@ sudo chattr -a ~/.dsh/agent-shell   # 后悔时解除（同样需要 sudo）
 > 加锁是**提示不是强制**：两条路都能用，面板 ⓘ 的「审计」行和 `shell_audit` 会如实显示
 > 「🔒已加锁 / 未加锁」与链校验结果。注意 `chattr` 只防"没有 root 的主体" —— 如果 AI 能拿到
 > root，它同样能解锁；在那种前提下本插件的审计保障就是"必可检测"这一层。
+
+## 最近更新（0.2.2）
+
+- **批处理一键发送**：输入框旁「发送到全部」按钮（≥2 个 shell）—— 输入一次，命令依次发到全部
+  shell（工具层 `shell_send`/`shell_run` 也接受逗号列表/`*`）。
+- **人机互斥跨面板可见**：`/list` 带 `userBusy`，`shell_state` 标注「⚠用户正在操作」—— AI/别的
+  面板 list 一下就知道谁被人在用。
+- **shell_wait 增量匹配**：`match:<regex>` 只匹配等待开始后**新出现**的输出（屏上旧词不再假成功），
+  默认 30s 超时、可传 `timeout`。
+- **授权菜单**：目录按**最近活跃**排序（不再是按创建），每项显示相对时间（刚刚/N 分钟前/…/天前）。
+- **通知 A**：命令跑完状态点闪 3 秒「刚结束」，新输出亮 `+N 行` 徽标 —— 纯面板内视觉，不打扰。
+- **UI**：无 shell 时下拉按钮保持两排（父容器不跳高）；下拉菜单与触发按钮左对齐。
+- **仅支持 Linux**（含 WSL2/容器）：详见上方「环境要求」的平台声明。
 
 ## 最近更新（0.2.1）
 

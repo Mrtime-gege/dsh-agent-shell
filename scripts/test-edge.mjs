@@ -958,6 +958,16 @@ const idOf = async (label, callFn) => {
     : []
   check(lockRecords.some((r) => r.result === 'unlock') && lockRecords.some((r) => r.result === 'lock'),
     `解锁/上锁进审计（${lockRecords.map((r) => r.result).join(', ') || '空'}）`)
+  // /busy 的登记要在 /list 里被看到（跨面板 / AI 一眼可见），在真实会话上验证。
+  // 注意：hPanel 在上一步已被改成「所有对话 · 只读」，不能再开新会话 —— 用本块开头已开的 ps-1。
+  const busyPsId = (await hPanel.call('/list', 'GET')).body.sessions?.[0]?.name
+  check(typeof busyPsId === 'string' && busyPsId !== '', `拿到了用于验证 /list 可见性的真实会话（${busyPsId ?? '无'}）`)
+  await hPanel.call('/busy', 'POST', { session: busyPsId, active: true })
+  const listBusy = (await hPanel.call('/list', 'GET')).body.sessions?.find((s) => s.name === busyPsId)
+  check(listBusy?.userBusy === true, '/list 带出 userBusy=true（AI / 别的面板 list 一下就能看到谁在被操作）')
+  await hPanel.call('/busy', 'POST', { session: busyPsId, active: false })
+  const listFree = (await hPanel.call('/list', 'GET')).body.sessions?.find((s) => s.name === busyPsId)
+  check(listFree?.userBusy === false, '解除登记后 /list 回到 userBusy=false')
 
   // (5) 按对话授权：活跃对话目录（/actors）—— 面板"主动给指定会话授权"的数据源
   const noQuery = await hPanel.call('/actors', 'GET')
@@ -970,6 +980,10 @@ const idOf = async (label, callFn) => {
   const actors = (await hActors.call('/actors', 'GET')).body
   check(actors.supported === true, '挂了 sessionQuery 时 /actors 返回 supported:true')
   check(Array.isArray(actors.actors) && actors.actors.length === 3, `目录带出 ${actors.actors?.length ?? 0} 个对话`)
+  check(actors.actors[0]?.id === 'other-conv',
+    `按最近活跃排序（${actors.actors[0]?.id} 在最前 —— updatedAt=30，而不是创建最新的 test-session/createdAt=3）`)
+  check(Number.isFinite(actors.actors[0]?.updated) && Number.isFinite(actors.actors[0]?.created),
+    '目录项带 created/updated 时间（面板据此显示相对时间）')
   const mine = actors.actors.find((a) => a.id === 'my-conv')
   const sub = actors.actors.find((a) => a.id === 'other-conv')
   check(mine !== undefined && mine.title === '我的对话' && mine.granted === false,
@@ -1246,6 +1260,17 @@ const idOf = async (label, callFn) => {
   check(String(opened).includes('(dsh-audit-model)'), `开了审计用会话（label=dsh-audit-model, id=${auditId}）：${String(opened).split('\n')[0]}`)
   await run('shell_send', { session: auditId, text: 'echo audit-marker-555', keys: ['Enter'] }, EXEC)
   await settle()
+  // shell_wait match 只匹配**等待开始后新出现**的输出：屏上已经有的旧词不该假成功
+  await run('shell_send', { session: auditId, text: 'echo OLD_MARK_777', keys: ['Enter'] }, EXEC)
+  await settle()
+  const staleHit = await run('shell_wait', { session: auditId, until: 'match:OLD_MARK_777', timeout: 1500 }, EXEC)
+  check(String(staleHit).includes('timeout'),
+    `match 不命中等待前屏上已有的旧词（增量语义，${String(staleHit).slice(0, 70)}）`)
+  const freshSend = await run('shell_send', { session: auditId, text: 'sleep 1; echo FRESH_MARK_888', keys: ['Enter'] }, EXEC)
+  // 不等它出结果直接进 wait：1 秒后输出才出现 → 属于"等待期间的新输出"（增量语义）
+  const freshHit = await run('shell_wait', { session: auditId, until: 'match:FRESH_MARK_888', timeout: 8000 }, EXEC)
+  check(String(freshHit).includes('reached'),
+    `match 命中等待后新出现的输出（${String(freshHit).slice(0, 70)}）`)
 
   const lines = readLines().slice(mark)
   const openRec = lines.find((r) => r.event === 'open' && r.shell === auditId)

@@ -86,6 +86,15 @@ and `Ctrl-C` behave the way they do in a terminal you are sitting at.
 
 ## Requirements
 
+> ### 🐧 Platform: Linux only (including WSL2 / containers)
+>
+> **This plugin supports Linux only**; macOS and native Windows are not supported — not because
+> porting is pending, but because the core mechanisms are Linux-specific: `tmux` (only Unix),
+> the nested-tmux foreground check reads the `/proc/<pid>` process tree, the watchdog uses
+> `systemd-run --user --scope`, and the optional audit lock uses `chattr +a`. macOS has `tmux`
+> but lacks the other three (untested, unsupported); on Windows run DSH inside **WSL2**, which is
+> Linux and works fully.
+
 > ### ⚙️ DSH version compatibility (breaking update)
 >
 > This plugin (**0.2.0**) targets **DSH 0.1.5 (developer preview)** and is verified on it
@@ -122,6 +131,24 @@ the profile composition for you. Restart `dsh web` once.
 > ⚠️ Do **not** also insert a patch row by hand: the bundled patch already inserts `id: agent-shell`,
 > and the id may only appear once — a duplicate makes `dsh web` fail at startup with
 > `duplicate loader entry id: agent-shell`.
+
+## Recent changes (0.2.2)
+
+* **Broadcast send**: a "send to all" button next to the input (enabled with ≥2 shells) runs the
+  input as a command in every shell in order (`shell_send`/`shell_run` also accept comma lists / `*`).
+* **Mutex visible across panels**: `/list` now carries `userBusy` per session and `shell_state`
+  marks a shell being operated by a human — list once and you know, instead of hitting a refusal.
+* **`shell_wait` incremental `match:`**: `match:<regex>` only matches output that appears *after*
+  the wait starts (stale screen text can no longer trigger a false success); 30 s default timeout,
+  overridable with `timeout`.
+* **Consent directory sorted by recent activity**: `/actors` sorts by last-active (`updatedAt`, then
+  `createdAt`), not creation time; each entry shows relative time ("just now / N min ago / … days ago").
+* **Quiet "done / new output" hints (option A)**: the status dot flashes for ~3 s when a command
+  finishes, and a `+N lines` badge lights up when new output arrives — visual only, no OS
+  notifications, no sound.
+* **UI**: the shell trigger keeps a two-line layout even with no shells (no container jumping), and
+  the dropdown now aligns with the trigger button's left edge.
+* **Linux only** (incl. WSL2/containers): see the platform note under Requirements.
 
 ## Recent changes (0.2.1)
 

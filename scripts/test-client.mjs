@@ -951,6 +951,18 @@ if (typeof scrollAnchor === 'function' && typeof contentShift === 'function') {
   check(Number.isFinite(grown.scrollTop) && grown.scrollTop >= 0, '从空输出到有输出不会算出 NaN')
 }
 
+/* ── 相对时间（授权目录的「最近使用」显示）─────────────────────────────────── */
+
+{
+  const timeAgoText = plugin?.__timeAgoText
+  check(typeof timeAgoText === 'function', '__timeAgoText 已暴露（授权目录相对时间）')
+  check(timeAgoText(Date.now()) === '刚刚', '相对时间：刚刚')
+  check(timeAgoText(Date.now() - 5 * 60 * 1000) === '5 分钟前', '相对时间：5 分钟前')
+  check(timeAgoText(Date.now() - 3 * 3600 * 1000) === '3 小时前', '相对时间：3 小时前')
+  check(timeAgoText(Date.now() - 2 * 86400 * 1000) === '2 天前', '相对时间：2 天前')
+  check(timeAgoText(NaN) === '' && timeAgoText('x') === '' && timeAgoText(null) === '', '非有限时间返回空串（未知就不显示）')
+}
+
 /* ── 组件渲染 + 事件处理器遍历（抓「只在打开面板时才炸」的错误）──────────────── */
 
 const ShellPanel = plugin?.__ShellPanel
@@ -1174,6 +1186,49 @@ if (typeof ShellPanel === 'function') {
       if (!busyFound) cells[i] = true
     }
     check(busyFound, '解锁且前台有 shell 时，头部中间出现「AI 写操作已暂停」提示条')
+
+    // ── 无 shell 占位 / 批处理按钮 / 授权目录时间 ────────────────────────────
+    const textOf = (node, out = []) => {
+      if (Array.isArray(node)) { node.forEach((n) => textOf(n, out)); return out }
+      if (typeof node === 'string') { out.push(node); return out }
+      if (node === null || typeof node !== 'object') return out
+      textOf(node.children, out)
+      return out
+    }
+    // 无 shell 时下拉触发按钮仍是两排（与有 shell 等高）：把 sessions（唯一数组 state）置空渲染一次。
+    // 探测完立即复原 —— 后面的处理器遍历还要用有 shell 的状态。
+    let nullShellFound = false
+    for (let i = 0; i < cells.length && !nullShellFound; i += 1) {
+      if (!Array.isArray(cells[i])) continue
+      const saved = cells[i]
+      cells[i] = []
+      try {
+        fake.reset()
+        const texts = textOf(panel())
+        nullShellFound = texts.includes('(无 shell)') && texts.includes('点 ＋ 新建')
+      } catch { nullShellFound = false }
+      cells[i] = saved
+    }
+    check(nullShellFound, '无 shell 时下拉触发按钮仍是两排结构（与有 shell 等高，父容器不会被撑跳）')
+
+    check(
+      propsOf(expanded).some((p) => typeof p.title === 'string' && p.title.indexOf('批处理一键发送') >= 0),
+      '输入框旁有「批处理一键发送」按钮（一键发到全部 shell）',
+    )
+
+    // 授权目录每项要显示相对时间（找 actors 那个 state：形状是 { supported, actors }）
+    let actorTimeFound = false
+    for (let i = 0; i < cells.length && !actorTimeFound; i += 1) {
+      const cell = cells[i]
+      if (cell === null || typeof cell !== 'object' || Array.isArray(cell) || cell.supported === undefined) continue
+      cells[i] = { supported: true, actors: [{ id: 'x1', title: 'x 会话一', updated: Date.now() - 5 * 60 * 1000, created: Date.now() - 600000, granted: false }] }
+      try {
+        fake.reset()
+        actorTimeFound = textOf(panel()).includes('5 分钟前')
+      } catch { actorTimeFound = false }
+      if (!actorTimeFound) cells[i] = cell
+    }
+    check(actorTimeFound, '授权目录每项显示相对时间（便于找最近的对话）')
 
     const handlers = collect(expanded)
     check(handlers.length > 12, `展开+详情态共有 ${handlers.length} 个事件处理器（覆盖 ⓘ 里的复制等）`)

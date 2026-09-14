@@ -231,7 +231,11 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
             session: { id },
             title: {
               title: id === String(config.__actor ?? 'test-session') ? '我的对话' : '其它会话',
-              eventSeq: 1, updatedAt: 1, messageSeqs: [], source: 'auto',
+              eventSeq: 1,
+              // updatedAt 故意与 createdAt 顺序**相反**：test-session 创建最新(3)但活跃最老(1)，
+              // other-conv 活跃最晚(30) —— 排序断言能分辨「按活跃排」而不是「按创建排」。
+              updatedAt: id === 'other-conv' ? 30 : (id === 'idle-conv' ? 10 : 1),
+              messageSeqs: [], source: 'auto',
             },
           },
         })),
