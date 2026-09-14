@@ -557,8 +557,8 @@ const idOf = async (label, callFn) => {
   check(noDoc.length === 0, `每个参数都有说明文字（缺说明的：${noDoc.join('、') || '无'}）`)
 
   // 说明里必须写明生效时机：需重启的要说「重启」，热更的要说「立即生效」
-  const RESTART_KEYS = ['socket', 'httpBase', 'exposeHttp', 'exposeTools', 'defaultTerminal', 'historyLimit', 'extendedKeys']
-  const LIVE_KEYS = ['watchdog', 'shell', 'cols', 'rows', 'maxSessions', 'defaultCwd', 'guardDangerousCommands']
+  const RESTART_KEYS = ['socket', 'httpBase', 'exposeHttp', 'exposeTools', 'defaultTerminal', 'historyLimit', 'extendedKeys', 'requireConsent', 'auditDir', 'guardDangerousCommands']
+  const LIVE_KEYS = ['watchdog', 'shell', 'cols', 'rows', 'maxSessions', 'defaultCwd']
   const describe = (key) => String(resolveRef(fields.find(([k]) => k === key)?.[1])?.meta?.description ?? '')
   const vague = []
   for (const key of RESTART_KEYS) if (!describe(key).includes('重启')) vague.push(`${key}(缺「重启」)`)

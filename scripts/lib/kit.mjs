@@ -122,7 +122,6 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   // 真的会在用户的服务端上建会话（实测踩过：一次崩溃把会话留在了生产 tmux 服务端上，
   // 后续测试立刻撞上 maxSessions 上限）。config 里有 socket 时仍以 config 为准
   // （有测试专门注入恶意 socket 名验证收敛）。
-  let settingsSource = () => ({ socket, ...config })
   const settingsChanges = []
   const settingsRegistrations = []
   // 可选：假的 ctx.systemPrompt（验证「注册了使用策略段落」而不必真起 DSH）
@@ -235,11 +234,17 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
     },
   }
 
+  // 基础配置：apply 时传入、changeSettings/settingsSource 重建 source 时也必须保留的字段。
+  // ⚠ 审计目录必须在这里：真实 settings 的 onChange 是**增量合并**（未改字段保留），
+  // 桩若用 `{ socket, ...config }` 重建就会丢掉 auditDir，把无关改动误判成"改过审计目录"。
+  const baseConfig = { socket, httpBase: base, watchdog: false, exposeHttp: true, exposeTools: true, auditDir: join(root, 'audit') }
+
   const mod = await import(join(pkgDir, 'lib', 'index.js'))
   // 审计目录指到临时目录：测试跑出来的审计/留痕文件绝不该落进用户真实目录
+  // 后续测试立刻撞上 maxSessions 上限）。config 里有 socket 时仍以 config 为准
+  let settingsSource = () => ({ ...baseConfig, ...config })
   mod.apply(ctx, {
-    socket, httpBase: base, watchdog: false, exposeHttp: true, exposeTools: true,
-    auditDir: join(root, 'audit'),
+    ...baseConfig,
     ...config,
   })
 
@@ -307,7 +312,7 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
     if (settings === undefined || settingsHooks === null) {
       throw new Error('测试未启用假 settings 服务（传 __withSettings: true）')
     }
-    const raw = { socket, ...config, ...next, __withSettings: true }
+    const raw = { ...baseConfig, ...config, ...next, __withSettings: true }
     const schema = settingsRegistrations[0]?.schema
     const candidate = typeof schema === 'function' ? schema(raw) : raw
     if (typeof settingsHooks.validate === 'function') settingsHooks.validate(candidate)

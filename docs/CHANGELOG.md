@@ -25,6 +25,19 @@
   详情层与授权浮层按 DSH 设计语言重绘（`--dsw-specific-menu` 菜单面、`--dsw-elevation-prominent`
   浮层阴影、20px 圆角、平台色底的分段控件、悬停行）；三浮层（下拉/详情/授权）**互斥**，
   开一个自动关另外两个。
+- **审计哈希链（可审计且不可篡改的第一层）**：每条审计记录携带 `prevHash`+`hash`（SHA-256，
+  键排序规范化、纯 JS 跨平台）；删一条/改一字节/调换顺序都会断链。启动时整链校验一次并恢复链头，
+  `shell_audit` 与面板 ⓘ 如实显示「链✓ / 链⚠断」与「🔒已加锁 / 未加锁」。授权事件
+  （grant/revoke/expire/inherit/deny）全部入链。
+- **注入修复（V-1/V-2）**：`lib/tmux.js` control 路径的会话名/键名插值全部过白名单
+  （`isSafeSessionName`/`isSafeKeyName`，`^[A-Za-z0-9_-]+$`），非法直接抛错而非转义 ——
+  堵住 `session: "x; pipe-pane -o …"` 这类经 tmux 执行任意命令的通道（此前实测可直连）。
+- **安全配置不可热改**：`requireConsent` / `auditDir` / `guardDangerousCommands` 改动了
+  **拒绝应用、保留旧值、要求重启**，并记一条 `event:config` 审计 —— 堵住"HTTP /settings 保存
+  即关掉授权门/审计"的即时通道。
+- **审计目录可选加锁**：`./install-deps.sh --audit-lock` 用 `chattr +a` 把审计目录改为
+  内核级 append-only（不可删/改，只能追加，需要一次性 sudo）。不加锁也有哈希链（篡改必可检测）。
+  README 写明两条路的收益/代价，加锁非强制。
 
 ## 0.1.6 — control-mode 四十倍提速 + 权限模型 + 安全修复 + 发布卫生
 

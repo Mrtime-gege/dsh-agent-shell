@@ -21,8 +21,9 @@ for arg in "$@"; do
   case "$arg" in
     --check) MODE="check" ;;
     --install|--yes|-y) MODE="install"; ASSUME_YES=1 ;;
+    --audit-lock) MODE="audit-lock" ;;
     --help|-h) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数：$arg（可用：--check / --yes / --help）" >&2; exit 2 ;;
+    *) echo "未知参数：$arg（可用：--check / --yes / --audit-lock / --help）" >&2; exit 2 ;;
   esac
 done
 
@@ -101,6 +102,44 @@ for extra in bash setsid; do
 done
 say ""
 
+if [ "$MODE" = "audit-lock" ]; then
+  AUDIT_DIR="${DSH_HOME:-$HOME/.dsh}/agent-shell"
+  say "── 审计目录加锁（chattr +a，内核级只追加）──────────────────────"
+  say ""
+  say "做什么：给 ${AUDIT_DIR} 设置 append-only 属性 —— 之后任何人都不能在其中"
+  say "        删除/改名文件（连你自己用普通权限也不行），只能追加。审计从"
+  say "        「篡改可检测」升级为「不可篡改」。"
+  say ""
+  say "代价：插件也无法再自动清理过期日志 —— 需要人工 sudo 归档。"
+  say "      若要解除锁：sudo chattr -a ${AUDIT_DIR}"
+  say ""
+  say "将执行："
+  say "    mkdir -p \"${AUDIT_DIR}\""
+  say "    sudo chattr +a \"${AUDIT_DIR}\""
+  say ""
+  if [ ! -d "$AUDIT_DIR" ]; then
+    note "目录不存在，先创建它"
+  fi
+  if [ "$ASSUME_YES" -ne 1 ]; then
+    printf '继续（需要 sudo，会问你要密码）？[y/N] '
+    read -r answer
+    case "$answer" in y|Y|yes|YES) ;; *) say "已取消。"; exit 1 ;; esac
+  fi
+  mkdir -p "$AUDIT_DIR"
+  if sudo chattr +a "$AUDIT_DIR"; then
+    ok "已加锁：$AUDIT_DIR"
+    if command -v lsattr >/dev/null 2>&1; then
+      say "复核：$(lsattr -d "$AUDIT_DIR" 2>/dev/null | awk '{print $1}')"
+    fi
+    say "结论：审计目录改为内核级只追加（不可篡改）。面板 ⓘ 详情会出现「🔒已加锁」。"
+    say "注意：此处不用再重启 dsh web（锁是文件系统属性，立即生效）。"
+    exit 0
+  fi
+  say "加锁失败（可能是 chattr 不支持、WSL 文件系统限制、或 sudo 被拒）。"
+  say "脚本不改任何东西，插件仍以「可检测」模式工作。"
+  exit 1
+fi
+
 # ── 3. 结论 / 安装 ──────────────────────────────────────────────────────────
 if [ "$NEED_ROOT_INSTALL" -eq 0 ]; then
   say "结论：依赖齐备，可以直接用。"
@@ -114,6 +153,7 @@ if [ -z "$CMD" ]; then
   say "请手动安装 tmux（Windows 需在 WSL 里运行 DSH），然后重新执行本脚本 --check。"
   exit 1
 fi
+
 
 if [ "$MODE" = "check" ]; then
   say "结论：缺 tmux。安装命令："

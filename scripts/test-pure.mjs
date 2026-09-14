@@ -77,5 +77,38 @@ pass((selfProcs.get(String(process.pid))?.comm ?? '') !== '', 'comm 读出来了
 const badProcs = await readDescendantProcs('not-a-pid')
 pass(badProcs instanceof Map && badProcs.size === 0, '非法 pid → 空表（不抛错）')
 
-console.log(failed === 0 ? `pure 纯函数：全部通过（${45} 项断言）` : `pure 纯函数：${failed} 项失败`)
+
+/* ── 审计哈希链 ────────────────────────────────────────────────────────────── */
+import { GENESIS, canonicalize, hashRecord, sealRecord, verifyChain, chainHeadOf, HASH_ALGO } from '../lib/audit.js'
+pass(GENESIS === 'genesis' && HASH_ALGO === 'sha256', '创世常量与算法固定（跨平台一致）')
+const r1 = { ts: 1, event: 'open', shell: 'dsh-a' }
+const s1 = sealRecord(GENESIS, r1)
+pass(typeof s1.hash === 'string' && s1.hash.length === 64, '封链补上 64 位 hex 摘要')
+pass(s1.prevHash === GENESIS, '首条记录 prevHash = 创世')
+pass(hashRecord(s1.prevHash, s1) === s1.hash, '摘要可复算（键序无关）')
+pass(hashRecord(s1.prevHash, { shell: 'dsh-a', event: 'open', ts: 1 }) === s1.hash, '字段顺序变化不影响摘要')
+const s2 = sealRecord(s1.hash, { ts: 2, event: 'input', shell: 'dsh-a', text: 'x' })
+const tampered = { ...s2, text: 'y' }
+pass(hashRecord(s2.prevHash, tampered) !== s2.hash, '改一个字节 → 摘要失配（篡改可检测）')
+pass(verifyChain([s1, s2]).ok === true, '完整链校验通过')
+pass(verifyChain([s1, s2]).sealed === 2, '封链计数正确')
+pass(verifyChain([s1, { ...s2, text: 'y' }]).ok === false, '中间篡改 → 断链')
+pass(verifyChain([s1, s2]).brokenAt === null, '完整链无断点')
+const legacy = { ts: 0, event: 'open', shell: 'old' }
+const mix = verifyChain([legacy, s1, s2])
+pass(mix.ok === true && mix.legacy === 1, '历史(未封链)记录跳过，不判断链')
+pass(chainHeadOf([legacy, s1, s2]) === s2.hash, '链头取最后一条封链摘要')
+pass(chainHeadOf([]) === GENESIS, '空链 → 创世')
+/* 注入白名单 */
+import { isSafeSessionName, isSafeKeyName } from '../lib/pure.mjs'
+pass(isSafeSessionName('dsh-ab12cd') === true, '稳定 id 通过白名单')
+pass(isSafeSessionName('a;b') === false, '分号被拒（tmux 命令分隔符）')
+pass(isSafeSessionName('a\tb') === false, '换行被拒')
+pass(isSafeSessionName('a"b') === false, '引号被拒')
+pass(isSafeSessionName('a$(id)') === false, '命令替换被拒')
+pass(isSafeSessionName('') === false && isSafeSessionName(null) === false, '空/非字符串被拒')
+pass(isSafeKeyName('C-c') === true && isSafeKeyName('Enter') === true, '合法键名通过')
+pass(isSafeKeyName('C-c; kill-server') === false, '键名注入被拒')
+
+console.log(failed === 0 ? `pure 纯函数：全部通过（${45 + 20} 项断言）` : `pure 纯函数：${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
