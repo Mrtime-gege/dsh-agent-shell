@@ -28,6 +28,18 @@
 
 ### 装机后修复（0.2.1 修订）
 
+- **人机互斥（面板解锁 = 人在操作）**：解锁输入框后，AI 的**写**工具（`shell_send`、`shell_run`
+  的发送）被宿主暂停，直到用户重新上锁 —— 防止"人机混合输入"（用户推了一半命令、AI 又补个回车，
+  或用户在 vim/交互程序里被 AI 一个 shell_run 搅乱）。口径：只作用于**面板当前前台的那根 shell**
+  （其它 shell 不受影响）；切走即自动上锁（busy 解除）、切过来的新 shell 默认上锁；解锁后无超时、
+  不自动释放（只有人自己上锁才算结束）。只读工具（shell_read/shell_state/shell_audit）不受影响。
+  实现：新增宿主 `POST /busy`（登记/解除，只收安全会话名，幂等）；`sendKeys`（AI 路径，
+  human:true 的面板输入放行）与 `shell_run` 在发送前检查，命中返回统一文案
+  （"用户正在操作终端 X（面板已解锁）：AI 写操作已暂停…请等候，或请用户先在面板上锁定该 shell"），
+  并记一条 `guard:'user-busy'` 审计；面板解锁/上锁/失焦/收起/切 shell/改名各自上报或迁移
+  （改名 = 同一根终端换名，busy 跟着新名字走），头部中间空白区在解锁时居中显示
+  "🤖 AI 写操作已暂停 · 你正在操作这台终端"（不碰 🔒 按钮）。明确它不是安全边界，README 已写明。
+
 - **点胶囊打不开面板**：localStorage 为空时 `rect` 为 null，`headCompact(rect.w)` 抛
   `Cannot read properties of null (reading 'w')`，整个浮层崩溃、点胶囊无反应 —— 真实 Chrome
   复现。改为 `headCompact(panelRect.w)`（rect 为 null 时回退到胶囊锚点矩形）。

@@ -933,6 +933,21 @@ const idOf = async (label, callFn) => {
   const revokeMissing = await hPanel.call('/consent', 'POST', { action: 'revoke-one', actor: 'no-such-actor' })
   check(revokeMissing.code === 404, `撤销不存在的授权 → HTTP ${revokeMissing.code}`)
 
+  // (4.5) 人机互斥登记（/busy）：面板解锁 = 人正在操作这根终端，AI 的写要让路
+  const busyOn = await hPanel.call('/busy', 'POST', { session: 'dsh-busy-01', active: true })
+  check(busyOn.code === 200 && busyOn.body.active === true && busyOn.body.busy.includes('dsh-busy-01'),
+    `POST /busy 登记「人在操作」（HTTP ${busyOn.code} / active=${busyOn.body.active}）`)
+  const busyTwice = await hPanel.call('/busy', 'POST', { session: 'dsh-busy-01', active: true })
+  check(busyTwice.code === 200 && busyTwice.body.busy.filter((n) => n === 'dsh-busy-01').length === 1,
+    '/busy 重复登记幂等（同一 shell 只出现一次）')
+  const busyOff = await hPanel.call('/busy', 'POST', { session: 'dsh-busy-01', active: false })
+  check(busyOff.code === 200 && busyOff.body.active === false && !busyOff.body.busy.includes('dsh-busy-01'),
+    'POST /busy 解除登记（上锁/切走时上报 false）')
+  const busyBad = await hPanel.call('/busy', 'POST', { session: 'dsh-x; rm -rf /', active: true })
+  check(busyBad.code === 400, `非安全会话名被拒（HTTP ${busyBad.code}，不许插值进 tmux control 的路径）`)
+  const busyNoName = await hPanel.call('/busy', 'POST', { active: true })
+  check(busyNoName.code === 400, `缺 session 字段 → HTTP ${busyNoName.code}`)
+
   // (5) 按对话授权：活跃对话目录（/actors）—— 面板"主动给指定会话授权"的数据源
   const noQuery = await hPanel.call('/actors', 'GET')
   check(noQuery.code === 200 && noQuery.body.supported === false,

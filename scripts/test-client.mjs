@@ -1158,27 +1158,57 @@ if (typeof ShellPanel === 'function') {
       `授权浮层打开时会真的去拉 /actors（实际请求 ${JSON.stringify(fetched)}）`,
     )
 
+    // ── 人机互斥提示条：解锁（locked=false）且前台有 shell 时，头部中间的空白区 ──
+    // 显示「AI 写操作已暂停」；折叠/上锁后消失。patch 把布尔都塞成 true（locked 也在内），
+    // 所以必须把正确的那一格翻成 false 再渲染（探测式，参照「手工填 id」的做法）。
+    const hasBusybar = (tree) => propsOf(tree)
+      .some((p) => typeof p.className === 'string' && p.className.indexOf('dshsh-busybar') >= 0)
+    let busyFound = false
+    for (let i = 0; i < cells.length && !busyFound; i += 1) {
+      if (cells[i] !== true) continue
+      cells[i] = false
+      try {
+        fake.reset()
+        busyFound = hasBusybar(panel())
+      } catch { busyFound = false }
+      if (!busyFound) cells[i] = true
+    }
+    check(busyFound, '解锁且前台有 shell 时，头部中间出现「AI 写操作已暂停」提示条')
+
     const handlers = collect(expanded)
     check(handlers.length > 12, `展开+详情态共有 ${handlers.length} 个事件处理器（覆盖 ⓘ 里的复制等）`)
 
+    // 解锁/上锁必须真的把「人在操作」上报给宿主（/busy）——否则宿主不会暂停 AI 的写。
+    // 处理器遍历里点锁按钮会触发 toggleLock → setUserBusy → fetch(/plugins/shell/busy)。
+    const busyFetches = []
+    const savedFetchBusy = context.fetch
+    context.fetch = (url) => { busyFetches.push(String(url)); return new Promise(() => {}) }
     const failures = []
-    for (const handler of handlers) {
-      try {
-        fake.reset()
-        handler.value({
-          preventDefault () {}, stopPropagation () {},
-          key: 'x', code: 'KeyX', keyCode: 88, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
-          target: { value: '' }, currentTarget: { value: '', select () {}, setPointerCapture () {}, releasePointerCapture () {} },
-          relatedTarget: null, nativeEvent: {},
-          // 滚动几何：缺了它 onScroll 会算出 NaN >= NaN（false），把 pinned 误关掉 —— 测试自身的假象
-          clientHeight: 400, scrollHeight: 1000, scrollTop: 600,
-          clientX: 0, clientY: 0, pointerId: 1,
-        })
-      } catch (error) {
-        failures.push(`${handler.className || '?'}.${handler.key}: ${String(error && error.message ? error.message : error)}`)
+    try {
+      for (const handler of handlers) {
+        try {
+          fake.reset()
+          handler.value({
+            preventDefault () {}, stopPropagation () {},
+            key: 'x', code: 'KeyX', keyCode: 88, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false,
+            target: { value: '' }, currentTarget: { value: '', select () {}, setPointerCapture () {}, releasePointerCapture () {} },
+            relatedTarget: null, nativeEvent: {},
+            // 滚动几何：缺了它 onScroll 会算出 NaN >= NaN（false），把 pinned 误关掉 —— 测试自身的假象
+            clientHeight: 400, scrollHeight: 1000, scrollTop: 600,
+            clientX: 0, clientY: 0, pointerId: 1,
+          })
+        } catch (error) {
+          failures.push(`${handler.className || '?'}.${handler.key}: ${String(error && error.message ? error.message : error)}`)
+        }
       }
+    } finally {
+      context.fetch = savedFetchBusy
     }
     check(failures.length === 0, `所有处理器的同步部分都能跑${failures.length === 0 ? '' : ' —— ' + failures.slice(0, 4).join(' | ')}`)
+    check(
+      busyFetches.some((u) => u.indexOf('/plugins/shell/busy') >= 0),
+      `解锁/上锁会把「人在操作」上报给宿主（/busy ${JSON.stringify(busyFetches)}）`,
+    )
 
     // 再渲染一次，重新登记 effect 回调（上一轮 patch 把 effect 单元换成了候选值）。
     // 先把布尔 state 复位成 true：处理器遍历会调用 setState，状态可能已被改过。

@@ -163,6 +163,15 @@ the profile composition for you. Restart `dsh web` once.
   for it but **no fetch effect** — the menu sat on "loading…" forever), refreshes after every
   grant/revoke, and falls back to a manual conversation-id entry (previously promised in the copy
   but never implemented) when the host has no session directory.
+* **Human-in-the-loop mutual exclusion**: unlocking the panel input means a human is operating that
+  terminal, so the plugin pauses the AI's **write** tools (`shell_send`; the sending part of
+  `shell_run`) until you re-lock — no more mixed human/AI input (you half-type a command and the AI
+  presses Enter on top of it). Only the shell currently shown in the panel is affected; other
+  shells keep working. Switching away auto-locks the previous shell and the new one starts locked;
+  there is no timeout or auto-release (only a manual lock ends it). Read-only tools
+  (`shell_read`/`shell_state`/`shell_audit`) are unaffected. This is **not a security boundary**
+  — it only stops two parties typing into the same terminal at once; authorization still governs
+  what the AI may execute.
 * **Data directory**: audit logs and output recordings live under
   `${DSH_HOME:-~/.dsh}/agent-shell/` (`audit/` for the hash-chained log, `output/` for
   per-session terminal recordings when enabled). Move it via the `auditDir` setting (absolute
