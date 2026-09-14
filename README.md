@@ -175,8 +175,8 @@ shell_read  { "session": "dsh-build" }
 审计目录默认是普通目录（`~/.dsh/agent-shell`），**默认路径 = 篡改可检测**。想要升级为
 **不可篡改**，可选加锁（内核级 append-only，需要 root 一次性执行）：
 
-> **数据目录**：审计与留痕默认都在 `${DSH_HOME:-~/.dsh}/agent-shell/` 下 —— `audit/` 放审计
-> （哈希链日志，按保留期自动清理），`output/` 放各会话的终端输出留痕（开启「输出留痕」后，
+> **数据目录**：审计与留痕默认都在 `${DSH_HOME:-~/.dsh}/agent-shell/` 下 —— `audit-YYYY-MM-DD.jsonl`
+> 是每天的审计（哈希链日志，按保留期自动清理），`output/` 放各会话的终端输出留痕（开启「输出留痕」后，
 > 按会话 id 命名，会话关闭后文件仍在）。想挪走（例如加密卷）就在设置里改 `auditDir`
 > （绝对路径，改动需重启 `dsh web` 生效）。
 

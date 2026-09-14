@@ -175,9 +175,9 @@ the profile composition for you. Restart `dsh web` once.
   audit record (`event:'panel-lock'`), and panel input was already audited via `/keys`
   (`event:'input', source:'panel'`) — nothing more is logged.
 * **Data directory**: audit logs and output recordings live under
-  `${DSH_HOME:-~/.dsh}/agent-shell/` (`audit/` for the hash-chained log, `output/` for
-  per-session terminal recordings when enabled). Move it via the `auditDir` setting (absolute
-  path; requires a `dsh web` restart).
+  `${DSH_HOME:-~/.dsh}/agent-shell/` (`audit-YYYY-MM-DD.jsonl` per day for the hash-chained log,
+  `output/` for per-session terminal recordings when enabled). Move it via the `auditDir` setting
+  (absolute path; requires a `dsh web` restart).
 
 ## Panel & tools
 
