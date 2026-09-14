@@ -17,6 +17,41 @@
 
 > Details on what it does and does not stop: [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md).
 
+## When it is worth using (typical cases)
+
+It solves two problems: **interactive work that needs a real TTY**, and **the cost of starting a process again and again**.
+
+### 1. Interactive command-line tools
+
+DSH's built-in line-oriented tool starts a **fresh, non-interactive process** for every call — anything that
+asks for a password, opens an interactive UI or needs `Ctrl-C` is out of reach for it. This plugin gives you a
+real `bash` inside a real tmux session, so all of the following work directly in the session:
+
+| Case | Why it needs "persistent + TTY" |
+|---|---|
+| **`sudo` privilege escalation** | The password prompt only exists on a TTY; send it once and later commands in that session already run as root — no need to prefix every command |
+| **`ssh` into another machine** | You land in a remote interactive shell and keep working there from the same session (remote output is recorded, but at "recording" fidelity, not effect-level truth) |
+| **`gdb` / `pdb` debugging** | Breakpoints, stepping and inspecting variables are stateful flows — the commands must stay inside one debugger session |
+| **`vim` / `nano` editing** | Full-screen editing needs a TTY and key sequences (`Esc`, `:wq`, mode switches) |
+| **REPLs / database clients** | `python`, `node`, `psql` carry session state (variables, transactions, connections) across calls |
+| **TUI programs** | `htop`, `top`, `tmux` and friends need a full screen and a real window size |
+| **`Ctrl-C` / long-running jobs** | Training, builds and services keep running in the session; switching conversations, hot reloads and quick restarts do not lose them, and the output is still there later |
+
+### 2. Avoiding repeated process startup
+
+* **The session is long-lived**: later operations just feed input into the same session, so there is no
+  re-`cd`, re-`export`, re-`source venv/bin/activate` — working directory, environment and background jobs carry over.
+* **Internally the plugin uses a long-lived tmux control-mode client** (~1ms pipe round-trip, measured) instead of
+  spawning a fresh client per operation (that path costs ~100ms of fixed overhead each time); the difference is
+  most visible for the panel's per-keystroke input and frequent screen reads.
+* Compared with "start a process for every command and exit", what you save is the process startup and
+  environment re-initialisation.
+
+> The reverse also holds: **one-shot, non-interactive commands** (reading files, running a test, `git status`) are
+> better served by DSH's built-in line tool — it starts fast and nobody has to watch it. This plugin is for the
+> work that genuinely needs a terminal, and the model's system prompt states that division of labour so it does
+> not open shells everywhere.
+
 ## Safety boundaries
 
 * **The model can run arbitrary commands.** The `shell_*` tools drive a real `bash` inside a real
