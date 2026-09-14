@@ -1211,11 +1211,6 @@ if (typeof ShellPanel === 'function') {
     }
     check(nullShellFound, '无 shell 时下拉触发按钮仍是两排结构（与有 shell 等高，父容器不会被撑跳）')
 
-    check(
-      propsOf(expanded).some((p) => typeof p.title === 'string' && p.title.indexOf('批处理一键发送') >= 0),
-      '输入框旁有「批处理一键发送」按钮（一键发到全部 shell）',
-    )
-
     // 授权目录每项要显示相对时间（找 actors 那个 state：形状是 { supported, actors }）
     let actorTimeFound = false
     for (let i = 0; i < cells.length && !actorTimeFound; i += 1) {

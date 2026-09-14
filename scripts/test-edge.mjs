@@ -1003,6 +1003,33 @@ const idOf = async (label, callFn) => {
   hPanel.cleanup()
 }
 
+/* ── 7.91 人机互斥覆盖「一切修改」：解锁的 shell 拒绝 AI 的 close/rename/resize ── */
+
+{
+  const hMz = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-mutex-mgmt`,
+    config: { watchdog: false, __consentMode: 'ok' },
+  })
+  const MZ = { agent: { session: { id: 'mz-conv' } } }
+  const opened = await hMz.run('shell_open', { name: 'mz-1' }, MZ)
+  const id = (String(opened).match(/session (\S+)/) ?? [])[1]
+  check(id !== undefined && id !== '', `开了互斥管理测试会话（${id}）`)
+  await hMz.call('/busy', 'POST', { session: id, active: true })
+  const c1 = await hMz.run('shell_manage', { action: 'close', session: id }, MZ)
+  check(String(c1).includes('REFUSED') && String(c1).includes('用户正在操作'),
+    `解锁中的 shell 拒绝 AI 关闭（${String(c1).split('\n')[0]}）`)
+  const r1 = await hMz.run('shell_manage', { action: 'rename', session: id, newName: 'nope' }, MZ)
+  check(String(r1).includes('REFUSED'), `解锁中的 shell 拒绝 AI 改名（${String(r1).split('\n')[0]}）`)
+  const z1 = await hMz.run('shell_manage', { action: 'resize', session: id, cols: 90, rows: 24 }, MZ)
+  check(String(z1).includes('REFUSED'), `解锁中的 shell 拒绝 AI 改尺寸（${String(z1).split('\n')[0]}）`)
+  const read1 = await hMz.run('shell_read', { session: id }, MZ)
+  check(String(read1).includes(`[${id}]`), `只读工具不受影响（shell_read 仍可用）`)
+  await hMz.call('/busy', 'POST', { session: id, active: false })
+  const c2 = await hMz.run('shell_manage', { action: 'close', session: id }, MZ)
+  check(String(c2).includes('closed'), `上锁后 close 恢复（${String(c2).split('\n')[0]}）`)
+  hMz.cleanup()
+}
+
 /* ── 7.98 授权询问的超时（超时 = 拒绝，而不是无限挂着）────────────────── */
 
 {

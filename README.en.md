@@ -134,8 +134,11 @@ the profile composition for you. Restart `dsh web` once.
 
 ## Recent changes (0.2.2)
 
-* **Broadcast send**: a "send to all" button next to the input (enabled with ≥2 shells) runs the
-  input as a command in every shell in order (`shell_send`/`shell_run` also accept comma lists / `*`).
+* **AI batch send (tool layer)**: `shell_send` / `shell_run` accept comma lists or `*` for
+  `session` (e.g. `"dsh-a,dsh-b"` / `"*"`) — one command, many shells, executed in list order.
+  (The WebUI input is for a human operating one terminal; it does not do batch.)
+* **Mutex upgraded to "every modification"**: while a shell is unlocked, AI sending,
+  rename, resize and close (incl. reap) are all refused; read-only tools and `/list` are unaffected.
 * **Mutex visible across panels**: `/list` now carries `userBusy` per session and `shell_state`
   marks a shell being operated by a human — list once and you know, instead of hitting a refusal.
 * **`shell_wait` incremental `match:`**: `match:<regex>` only matches output that appears *after*
@@ -191,13 +194,14 @@ the profile composition for you. Restart `dsh web` once.
   grant/revoke, and falls back to a manual conversation-id entry (previously promised in the copy
   but never implemented) when the host has no session directory.
 * **Human-in-the-loop mutual exclusion**: unlocking the panel input means a human is operating that
-  terminal, so the plugin pauses the AI's **write** tools (`shell_send`; the sending part of
-  `shell_run`) until you re-lock — no more mixed human/AI input (you half-type a command and the AI
-  presses Enter on top of it). Only the shell currently shown in the panel is affected; other
-  shells keep working. Switching away auto-locks the previous shell and the new one starts locked;
-  there is no timeout or auto-release (only a manual lock ends it). Read-only tools
+  terminal, so the plugin pauses **every modification** the AI could make to that shell
+  (`shell_send`; the sending part of `shell_run`; and rename / resize / close) until you re-lock —
+  no more mixed human/AI input (you half-type a command and the AI presses Enter on top of it), and
+  no "human is inside it, AI closes the terminal". Only the shell currently shown in the panel is
+  affected; other shells keep working. Switching away auto-locks the previous shell and the new one
+  starts locked; there is no timeout or auto-release (only a manual lock ends it). Read-only tools
   (`shell_read`/`shell_state`/`shell_audit`) are unaffected. This is **not a security boundary**
-  — it only stops two parties typing into the same terminal at once; authorization still governs
+  — it only stops two parties touching the same terminal at once; authorization still governs
   what the AI may execute. Human actions are recorded truthfully: unlock/lock each produce an
   audit record (`event:'panel-lock'`), and panel input was already audited via `/keys`
   (`event:'input', source:'panel'`) — nothing more is logged.
