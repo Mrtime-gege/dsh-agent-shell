@@ -213,8 +213,25 @@ export async function makeHarness ({ tgz, peersDir, socket, config = {} }) {
   const base = String(config.httpBase ?? '/plugins/shell')
   const services = { subprocess, timer }
   if (settings !== undefined) services.settings = settings
+  // 假的 sessionQuery：仅当 config.__sessionQuery 提供时才挂 —— 用于测「按对话授权」的 /actors。
+  // 默认不挂（对应旧宿主/未挂载），/actors 应如实返回 supported:false。
+  const sessionQuery = config.__sessionQuery === true
+    ? {
+        listSessions: async () => [
+          { header: { id: String(config.__actor ?? 'test-session'), createdAt: 3, origin: undefined }, live: true, persisted: true },
+          { header: { id: 'other-conv', createdAt: 2, origin: 'subagent', delegationDepth: 1 }, live: true, persisted: true },
+          { header: { id: 'idle-conv', createdAt: 1, origin: undefined }, live: false, persisted: true },
+        ],
+        readTitleSnapshots: async (ids) => (Array.isArray(ids) ? ids : []).map((id) => ({
+          sessionId: id,
+          status: 'fulfilled',
+          value: { title: id === String(config.__actor ?? 'test-session') ? '我的对话' : '其它会话' },
+        })),
+      }
+    : undefined
+  if (sessionQuery !== undefined) services.sessionQuery = sessionQuery
   const ctx = {
-    get: (name) => ({ subprocess, timer, settings, systemPrompt, userQuestions })[name],
+    get: (name) => ({ subprocess, timer, settings, systemPrompt, userQuestions, sessionQuery })[name],
     effect,
     on: () => () => {},
     logger: { log: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')) },

@@ -2,6 +2,30 @@
 
 本文件记录 `dsh-agent-shell` 的版本变化。
 
+## 0.2.1 — 审计不可篡改 + 详情整合 + 按对话授权
+
+- **审计哈希链（可审计且不可篡改的第一层）**：每条审计记录携带 `prevHash`+`hash`（SHA-256，
+  键排序规范化、纯 JS 跨平台）；删一条/改一字节/调换顺序都会断链。启动时整链校验一次并恢复链头，
+  `shell_audit` 与面板 ⓘ 如实显示「链✓ / 链⚠断」与「🔒已加锁 / 未加锁」。授权事件
+  （grant/revoke/expire/inherit/deny）全部入链。
+- **注入修复（V-1/V-2）**：`lib/tmux.js` control 路径的会话名/键名插值全部过白名单
+  （`isSafeSessionName`/`isSafeKeyName`，`^[A-Za-z0-9_-]+$`），非法直接抛错而非转义 ——
+  堵住 `session: "x; pipe-pane -o …"` 这类经 tmux 执行任意命令的通道（此前实测可直连）。
+- **安全配置不可热改**：`requireConsent` / `auditDir` / `guardDangerousCommands` 改动了
+  **拒绝应用、保留旧值、要求重启**，并记一条 `event:config` 审计 —— 堵住"HTTP /settings 保存
+  即关掉授权门/审计"的即时通道。
+- **审计目录可选加锁**：`./install-deps.sh --audit-lock` 用 `chattr +a` 把审计目录改为
+  内核级 append-only（不可删/改，只能追加，需要一次性 sudo）。不加锁也有哈希链（篡改必可检测）。
+  README 写明两条路的收益/代价，加锁非强制。
+
+- **详情页整合（方案 A）**：7 个逻辑分组平铺 37 行 → **4 张可折叠卡片**（会话 / 安全 / 系统 / 关于），
+  默认只展开高频两张，首屏约 8 行；安全相关行（审计链、锁定、留痕、护栏、审批）集中进「安全」卡。
+- **按对话授权（主动授予指定会话）**：新增宿主 `GET /actors`（源自 `sessionQuery` 的活跃对话目录，
+  带标题 / 是否子代理 / 当前授权状态，5 秒缓存且授权变更即失效）；授权浮层新增「按对话授权」分区：
+  搜索 → 选中 → 档位 × 有效期 → 单独授予（不写成通配，不波及其它对话）。
+- **菜单互斥完善**：面板内点击任何**浮层以外**的地方即关闭全部浮层；点击头部按钮条不误关
+  （各自管开合）；点击**插件之外**（DSH 页面其它地方）不关。
+
 ## 0.2.0 — 工具面 v2 重构 + 稳定 id 会话身份（破坏性）
 
 - **事故复盘（2026-09-13）**：新增 `lib/pure.mjs` 后 dev-sync.sh 的 `lib/*.js` glob 漏拷
@@ -25,19 +49,6 @@
   详情层与授权浮层按 DSH 设计语言重绘（`--dsw-specific-menu` 菜单面、`--dsw-elevation-prominent`
   浮层阴影、20px 圆角、平台色底的分段控件、悬停行）；三浮层（下拉/详情/授权）**互斥**，
   开一个自动关另外两个。
-- **审计哈希链（可审计且不可篡改的第一层）**：每条审计记录携带 `prevHash`+`hash`（SHA-256，
-  键排序规范化、纯 JS 跨平台）；删一条/改一字节/调换顺序都会断链。启动时整链校验一次并恢复链头，
-  `shell_audit` 与面板 ⓘ 如实显示「链✓ / 链⚠断」与「🔒已加锁 / 未加锁」。授权事件
-  （grant/revoke/expire/inherit/deny）全部入链。
-- **注入修复（V-1/V-2）**：`lib/tmux.js` control 路径的会话名/键名插值全部过白名单
-  （`isSafeSessionName`/`isSafeKeyName`，`^[A-Za-z0-9_-]+$`），非法直接抛错而非转义 ——
-  堵住 `session: "x; pipe-pane -o …"` 这类经 tmux 执行任意命令的通道（此前实测可直连）。
-- **安全配置不可热改**：`requireConsent` / `auditDir` / `guardDangerousCommands` 改动了
-  **拒绝应用、保留旧值、要求重启**，并记一条 `event:config` 审计 —— 堵住"HTTP /settings 保存
-  即关掉授权门/审计"的即时通道。
-- **审计目录可选加锁**：`./install-deps.sh --audit-lock` 用 `chattr +a` 把审计目录改为
-  内核级 append-only（不可删/改，只能追加，需要一次性 sudo）。不加锁也有哈希链（篡改必可检测）。
-  README 写明两条路的收益/代价，加锁非强制。
 
 ## 0.1.6 — control-mode 四十倍提速 + 权限模型 + 安全修复 + 发布卫生
 

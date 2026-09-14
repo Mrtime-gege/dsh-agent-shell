@@ -932,6 +932,34 @@ const idOf = async (label, callFn) => {
   check(revokeOne.code === 200, '逐条撤销成功')
   const revokeMissing = await hPanel.call('/consent', 'POST', { action: 'revoke-one', actor: 'no-such-actor' })
   check(revokeMissing.code === 404, `撤销不存在的授权 → HTTP ${revokeMissing.code}`)
+
+  // (5) 按对话授权：活跃对话目录（/actors）—— 面板"主动给指定会话授权"的数据源
+  const noQuery = await hPanel.call('/actors', 'GET')
+  check(noQuery.code === 200 && noQuery.body.supported === false,
+    `没有 sessionQuery 时如实返回 supported:false（HTTP ${noQuery.code}）`)
+  const hActors = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-actors`,
+    config: { watchdog: false, __consentMode: 'ok', __sessionQuery: true, __actor: 'my-conv' },
+  })
+  const actors = (await hActors.call('/actors', 'GET')).body
+  check(actors.supported === true, '挂了 sessionQuery 时 /actors 返回 supported:true')
+  check(Array.isArray(actors.actors) && actors.actors.length === 3, `目录带出 ${actors.actors?.length ?? 0} 个对话`)
+  const mine = actors.actors.find((a) => a.id === 'my-conv')
+  const sub = actors.actors.find((a) => a.id === 'other-conv')
+  check(mine !== undefined && mine.title === '我的对话' && mine.granted === false,
+    `目录项含标题与授权状态（${mine?.title} / granted=${mine?.granted}）`)
+  check(sub !== undefined && sub.origin === 'subagent' && sub.depth === 1,
+    '子代理身份被标注（面板据此区分，不把子代理当普通对话）')
+  // 按对话授权：set + 具体 actor（不是 '*'）—— 只影响这个对话
+  const grantOne = await hActors.call('/consent', 'POST', { action: 'set', actor: 'my-conv', scope: 'read', ttlSeconds: 600 })
+  check(grantOne.code === 200, 'POST /consent set + 具体 actor → 成功')
+  const after = (await hActors.call('/consent', 'GET')).body
+  check(after.wildcard === null, '按对话授权**没有**写成通配（不波及其它对话）')
+  check(Array.isArray(after.granted) && after.granted.includes('my-conv'), '该对话出现在授权列表里')
+  const actors2 = (await hActors.call('/actors', 'GET')).body
+  check(actors2.actors.find((a) => a.id === 'my-conv')?.granted === true, '目录里该项变为已授权')
+  check(actors2.actors.find((a) => a.id === 'idle-conv')?.granted === false, '其它对话未被波及')
+  hActors.cleanup()
   hPanel.cleanup()
 }
 

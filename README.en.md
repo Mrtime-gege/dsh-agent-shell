@@ -86,7 +86,7 @@ the profile composition for you. Restart `dsh web` once.
 > and the id may only appear once — a duplicate makes `dsh web` fail at startup with
 > `duplicate loader entry id: agent-shell`.
 
-## Recent changes (0.2.0)
+## Recent changes (0.2.1)
 
 * **Identity = stable id.** The tmux session name is a generated id that never changes; the
   display name is a separable `label` (`@dsh-label` session option) you can rename freely. All
@@ -103,6 +103,23 @@ the profile composition for you. Restart `dsh web` once.
   consent popovers were redrawn in DSH's design language; the three popovers (picker/info/consent)
   are mutually exclusive. Verified with two shells doing 10 nested `ssh → Windows host → wsl → Kali`
   round-trips each (20 live ssh processes), left alive on request.
+
+### Audit integrity + panel consolidation (0.2.1)
+
+* **Tamper-evident audit**: every audit record carries `prevHash`+`hash` (SHA-256 over a
+  key-sorted canonical form, pure JS) — deleting a line, flipping a byte or reordering breaks the
+  chain and is reported in `shell_audit` and the panel. Optional one-time `chattr +a` on the audit
+  directory upgrades "detectable" to "immutable" (`./install-deps.sh --audit-lock`).
+* **Injection fix**: session/key names interpolated into control-mode commands are whitelisted
+  (`^[A-Za-z0-9_-]+$`) and rejected otherwise, closing the "run arbitrary tmux commands via the
+  `session` argument" path.
+* **Security config is not hot-reloadable**: `requireConsent` / `auditDir` / `guardDangerousCommands`
+  changes keep the old value and require a restart (plus an audit record). Everything else — new
+  conversations, granting, revoking — stays immediate.
+* **Panel**: the info drawer is now four collapsible cards (Session / Security / System / About);
+  the consent popover can grant **one specific conversation** (search the live conversation
+  directory via `GET /actors`, pick scope × TTL); clicking anywhere inside the panel but outside a
+  popover closes all popovers, while clicking outside the panel does not.
 
 ## Panel & tools
 

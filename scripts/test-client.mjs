@@ -253,6 +253,13 @@ if (typeof infoRows === 'function') {
       adoptedWatchdog: false, keptAtBoot: ['dsh-a', 'dsh-b'],
       approval: { integrated: false, seam: 'mounted', policy: 'never', policySource: 'session-override',
         deploymentPolicy: 'ask', permissionMode: 'workspace-work', warning: 'W' },
+      // 审计与链：详情页「安全」卡要显示链结论与加锁状态（校验结论不展示 = 没做）
+      audit: {
+        enabled: true, dir: '/tmp/dsh-audit', retentionDays: 30, note: '',
+        capture: true, captureMaxBytes: 67108864, captureStopped: [],
+        chain: { ok: true, sealed: 12, legacy: 2, startUnknown: false, brokenAt: null, head: 'abc123', checkedAt: 0 },
+        locked: 'append-only',
+      },
     },
     meta: { name: 'dsh-build', cols: 120, rows: 32, foreground: 'make', attached: false, historySize: 178, historyLimit: 100000, historyBytes: 40960 },
     sessions: [{ name: 'dsh-build' }], historyWindow: 200, maxWindow: 5000,
@@ -271,7 +278,11 @@ if (typeof infoRows === 'function') {
     ['服务端', 'socket', '-L dsh-agent'],
     ['服务端', '会话数', '1 / 8'],
     ['服务端', 'extended-keys', '开'],
-    ['服务端', '危险命令护栏', '开'],
+    ['审批与安全', '危险命令护栏', '开'],
+    ['审批与安全', '审计', '开 · 保留 30 天'],
+    ['审批与安全', '输出留痕', '开 · 单会话上限 64 MiB'],
+    ['审批与安全', '审计链', '✓ 通过 · 12 条封链'],
+    ['审批与安全', '审计锁定', '🔒 已加锁'],
     ['孤儿看门狗', '看门狗', 'pid 12345'],
     ['孤儿看门狗', '启动时保住', 'dsh-a, dsh-b'],
     ['审批与安全', '官方审批', '未接入'],
@@ -285,6 +296,19 @@ if (typeof infoRows === 'function') {
   check(flat.some((r) => r.g === '审批与安全' && r.tone === 'warn'), '审批未接入被标成告警色')
   check(flat.filter((r) => r.g === '键位表').length >= 8, `键位表条目数 = ${flat.filter((r) => r.g === '键位表').length}`)
   check(has('版本', '来源') && flat.find((r) => r.k === '来源').v.includes('AI 开发'), '详情层写明「由 AI 开发」')
+
+  // 断链必须显式告警（篡改可见的展示面：结论不展示 = 没做）
+  {
+    const broken = infoRows({
+      server: { audit: { enabled: true, dir: '/x', retentionDays: 30,
+        chain: { ok: false, brokenAt: { index: 4, reason: 'hash-mismatch', ts: 1 }, sealed: 4, legacy: 0, startUnknown: false },
+        locked: 'writable' } },
+      meta: null, sessions: [], historyLocked: true,
+    }).flatMap((g) => g.rows).find((r) => r.k === '审计链')
+    check(broken !== undefined && broken.v.startsWith('⚠') && broken.v.includes('第 5 条'),
+      `断链在详情里显式告警：${broken ? broken.v : '(缺失)'}`)
+    check(broken !== undefined && broken.tone === 'warn', '断链行标成告警色')
+  }
 
   // 最要紧的一组：字段全缺 / 半缺时不许抛错，也不许出现 undefined
   const shapes = [
