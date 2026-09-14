@@ -167,6 +167,13 @@ sudo chattr -a ~/.dsh/agent-shell   # 后悔时解除（同样需要 sudo）
 - **三浮层互斥**：shell 下拉 / 详情 / 授权任何时候只开一个（打开即自动关掉另外两个），收起面板时全部复位。
 - 实机验证：两个 shell 同时各自完成 10 层 `ssh → Windows 宿主 → wsl → Kali` 嵌套往返（20 个存活 ssh 进程），全程保留未关闭。
 
+### 安全与审计（0.3 批次 1 · 尚未发布）
+
+- **审计哈希链**：每条审计记录携带 `prevHash`+`hash`（SHA-256，键排序规范化，纯 JS 跨平台）—— 删一条、改一个字节、调换顺序都会断链并**必可发现**。启动时整链校验一次并恢复链头续写；`shell_audit` 与面板 ⓘ 如实显示「链✓(N条) / 链⚠断(第K条)」与锁状态（校验结论不展示等于没做）。授权事件（授权/撤销/过期/继承/拒绝）全部在链上。
+- **注入修复**：control 路径的会话名/键名插值全部过白名单（`isSafeSessionName`/`isSafeKeyName`），非法直接抛错、不转义放行 —— 堵住 `session: "x; pipe-pane -o …"` 这类经 tmux 执行任意命令的通道。
+- **安全配置不可热改**：`requireConsent` / `auditDir` / `guardDangerousCommands` 的改动被**拒绝应用、保留旧值、要求重启**，并记一条 `event:config` 审计 —— 堵住"HTTP 保存即关掉授权门/审计"的即时通道。**注意：只有改这三个配置项需要重启；新建会话、授权新对话、撤销授权全部即时生效。**
+- **审计与授权设计**：详情见上方「[审计：可检测 vs 不可篡改（可选加锁）](#审计可检测-vs-不可篡改可选加锁)」；设计稿见 [docs/设计-授权与审计重构.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/设计-授权与审计重构.md)。
+
 ## 版本与发布
 
 发版流程、发布纪律与自动推送配置见 [docs/PUBLISHING.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/PUBLISHING.md) 与 [docs/发布自动推送.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/%E5%8F%91%E5%B8%83%E8%87%AA%E5%8A%A8%E6%8E%A8%E9%80%81.md)；公开仓只在发版时前移。
