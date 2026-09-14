@@ -26,6 +26,20 @@
 - **菜单互斥完善**：面板内点击任何**浮层以外**的地方即关闭全部浮层；点击头部按钮条不误关
   （各自管开合）；点击**插件之外**（DSH 页面其它地方）不关。
 
+### 装机后修复（0.2.1 修订）
+
+- **点胶囊打不开面板**：localStorage 为空时 `rect` 为 null，`headCompact(rect.w)` 抛
+  `Cannot read properties of null (reading 'w')`，整个浮层崩溃、点胶囊无反应 —— 真实 Chrome
+  复现。改为 `headCompact(panelRect.w)`（rect 为 null 时回退到胶囊锚点矩形）。
+- **「按对话授权」目录拉不出来**：`/actors` 接口与界面都存在，但客户端**没有拉取的 effect**
+  （`setActors` 从没被调用），菜单永远停在「正在读取对话列表…」。补 effect：菜单打开即拉取、
+  授权/撤销后重拉；并实现文案承诺过但缺失的「手工填会话 id」降级入口（宿主无 sessionQuery 时）。
+- **测试假绿修复**：假 React 的 `patch` 不再把 `null` 替换成候选值（否则 `rect` 空引用类崩溃
+  在测试里永不发生），且按**原值类型**替换字符串/数字 state（此前把字符串换成对象 →
+  `actorManual.trim is not a function` 这类测试自造的错）；新增 3 条断言：展开态真的渲染出
+  面板主体、授权浮层打开时真的发起 `/plugins/shell/actors` 请求（变异测试验证：去掉 effect
+  即失败）、宿主无目录时给出手工填 id 入口。test-client 368 → 377。
+
 ## 0.2.0 — 工具面 v2 重构 + 稳定 id 会话身份（破坏性）
 
 - **事故复盘（2026-09-13）**：新增 `lib/pure.mjs` 后 dev-sync.sh 的 `lib/*.js` glob 漏拷

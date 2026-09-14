@@ -997,7 +997,17 @@ if (typeof ShellPanel === 'function') {
         const isRef = value !== null && typeof value === 'object' && !Array.isArray(value) &&
           'current' in value && Object.keys(value).length === 1
         if (isRef) return
-        cells[index] = typeof value === 'boolean' ? true : candidates[index % candidates.length]
+        // ⚠ null 保持 null：面板的 rect / meta 等 state 初始就是 null，而**渲染期读 null 的属性**
+        // 正是真实崩溃的来源（`headCompact(rect.w)` 在 localStorage 空时崩，见 0.2.1 修复）。
+        // 早先把 null 也换成候选值 → 这类 bug 在测试里永远不会发生（假绿）。
+        if (value === null) return
+        // 按**原值类型**替换：字符串 state 就换字符串、数字就换数字。
+        // 早先一律塞候选值（对象/数组），于是 `actorManual.trim()` 这种正常代码在测试里
+        // 报「trim is not a function」——那是测试自己造出来的错，会掩盖真错误。
+        if (typeof value === 'boolean') { cells[index] = true; return }
+        if (typeof value === 'string') { cells[index] = 'x'; return }
+        if (typeof value === 'number') { cells[index] = 1; return }
+        cells[index] = candidates[index % candidates.length]
       },
     }
   }
@@ -1072,6 +1082,81 @@ if (typeof ShellPanel === 'function') {
       expandedError = String(error && error.message ? error.message : error)
     }
     check(expanded !== null, `打开内部状态后仍能渲染（打了 ${cellsBefore} 个 state 单元）${expanded === null ? ' —— ' + expandedError : ''}`)
+
+    // ⚠ 前提断言：这一遍必须**真的是展开态**。
+    // 如果 patch 没有把开关真的打开，渲染出的还是折叠态胶囊 —— 那么下面所有「展开后才执行」
+    // 的断言（含 rect 为 null 时的 `headCompact(panelRect.w)`）都是假绿：代码根本没跑到。
+    // 0.2.1 修的那个崩溃（localStorage 空 → rect 为 null → 读 rect.w 抛 TypeError）此前没被
+    // 测试抓住，就是因为缺了这一条。
+    const classNamesOf = (node, out = []) => {
+      if (Array.isArray(node)) { node.forEach((n) => classNamesOf(n, out)); return out }
+      if (node === null || typeof node !== 'object') return out
+      const cn = node.props && node.props.className
+      if (typeof cn === 'string') out.push(cn)
+      classNamesOf(node.children, out)
+      return out
+    }
+    const expandedClasses = classNamesOf(expanded)
+    check(
+      expandedClasses.some((c) => c.indexOf('dshsh-head') >= 0),
+      `展开态确实渲染出面板主体（class 数 ${expandedClasses.length}，rect 单元=${String(fake.cells().some((c) => c === null))}）`,
+    )
+
+    // 授权浮层（consentMenuOpen 也被 patch 成 true）里承诺的「手工填 id」入口必须真的存在。
+    // 文案写了「再选『手工填 id』」，界面里却从来没有那个入口 —— 用户会被指向一个不存在的按钮。
+    //
+    // 上面那遍渲染里 actors 仍是 null（还没拉回来），显示的是「正在读取…」，所以手工入口还没出现。
+    // 这里逐个试：把某个 null 单元换成「宿主不支持对话目录」的返回值，看谁能让手工入口出现。
+    const propsOf = (node, out = []) => {
+      if (Array.isArray(node)) { node.forEach((n) => propsOf(n, out)); return out }
+      if (node === null || typeof node !== 'object') return out
+      if (node.props) out.push(node.props)
+      propsOf(node.children, out)
+      return out
+    }
+    const hasManualInput = (tree) => propsOf(tree)
+      .some((p) => typeof p.placeholder === 'string' && p.placeholder.indexOf('会话 id') >= 0)
+
+    const cells = fake.cells()
+    let manualFound = false
+    let probeErr = ''
+    const probeTry = []
+    for (let i = 0; i < cells.length && !manualFound; i += 1) {
+      if (cells[i] !== null) continue
+      cells[i] = { supported: false, note: '宿主未提供对话目录', actors: [] }
+      let has = false
+      try {
+        fake.reset()
+        has = hasManualInput(panel())
+      } catch (error) { probeErr = String(error && error.message ? error.message : error) }
+      probeTry.push(`${i}:${has ? 'yes' : 'no'}`)
+      manualFound = has
+      if (!manualFound) cells[i] = null
+    }
+    check(manualFound, '宿主没有对话目录时，授权浮层给出「手工填会话 id」入口（不是只在文案里承诺）')
+
+    // ── 「按对话授权」的目录必须真的被拉取 ────────────────────────────────────
+    //
+    // 曾经的 bug：state / 界面 / 宿主接口全都在，**唯独没有 effect 去拉** —— 菜单永久停在
+    // 「正在读取对话列表…」，功能是死的。渲染不抛错，所以渲染测试抓不到；只能断言"真的发了请求"。
+    const fetched = []
+    const savedFetch = context.fetch
+    context.fetch = (url) => { fetched.push(String(url)); return new Promise(() => {}) }
+    try {
+      fake.reset()
+      panel() // consentMenuOpen 已被 patch 成 true，此时 effect 不会提前 return
+      for (const fn of fake.effects()) {
+        // 只跑拉目录那个 effect：其它 effect 是轮询，跑起来会留下真实定时器
+        if (String(fn).indexOf('loadActors') < 0) continue
+        try { fn() } catch { /* effect 抛错由渲染/处理器断言负责 */ }
+      }
+    } finally {
+      context.fetch = savedFetch
+    }
+    check(
+      fetched.some((u) => u.indexOf('/plugins/shell/actors') >= 0),
+      `授权浮层打开时会真的去拉 /actors（实际请求 ${JSON.stringify(fetched)}）`,
+    )
 
     const handlers = collect(expanded)
     check(handlers.length > 12, `展开+详情态共有 ${handlers.length} 个事件处理器（覆盖 ⓘ 里的复制等）`)

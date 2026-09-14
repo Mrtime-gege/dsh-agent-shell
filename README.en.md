@@ -157,6 +157,16 @@ the profile composition for you. Restart `dsh web` once.
   the consent popover can grant **one specific conversation** (search the live conversation
   directory via `GET /actors`, pick scope × TTL); clicking anywhere inside the panel but outside a
   popover closes all popovers, while clicking outside the panel does not.
+* **Post-install fixes**: opening the panel no longer crashes on a fresh profile (empty
+  `localStorage` → `rect` is null; width is now read from the anchor-derived `panelRect` instead
+  of `rect.w`); the per-conversation grant directory actually loads now (there was state and UI
+  for it but **no fetch effect** — the menu sat on "loading…" forever), refreshes after every
+  grant/revoke, and falls back to a manual conversation-id entry (previously promised in the copy
+  but never implemented) when the host has no session directory.
+* **Data directory**: audit logs and output recordings live under
+  `${DSH_HOME:-~/.dsh}/agent-shell/` (`audit/` for the hash-chained log, `output/` for
+  per-session terminal recordings when enabled). Move it via the `auditDir` setting (absolute
+  path; requires a `dsh web` restart).
 
 ## Panel & tools
 
