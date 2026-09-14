@@ -947,6 +947,17 @@ const idOf = async (label, callFn) => {
   check(busyBad.code === 400, `非安全会话名被拒（HTTP ${busyBad.code}，不许插值进 tmux control 的路径）`)
   const busyNoName = await hPanel.call('/busy', 'POST', { active: true })
   check(busyNoName.code === 400, `缺 session 字段 → HTTP ${busyNoName.code}`)
+  // 用户操作留痕：解锁/上锁各记一条 panel-lock（输入早已在 /keys 记 event:'input'）
+  const lockDay = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()
+  const lockAuditFile = join(hPanel.pkgDir, '..', 'audit', `audit-${lockDay}.jsonl`)
+  await new Promise((r) => setTimeout(r, 350))   // recordAudit 是 fire-and-forget 异步落盘
+  const lockRecords = existsSync(lockAuditFile)
+    ? readFileSync(lockAuditFile, 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l))
+      .filter((r) => r.event === 'panel-lock' && r.shell === 'dsh-busy-01')
+    : []
+  check(lockRecords.some((r) => r.result === 'unlock') && lockRecords.some((r) => r.result === 'lock'),
+    `解锁/上锁进审计（${lockRecords.map((r) => r.result).join(', ') || '空'}）`)
 
   // (5) 按对话授权：活跃对话目录（/actors）—— 面板"主动给指定会话授权"的数据源
   const noQuery = await hPanel.call('/actors', 'GET')

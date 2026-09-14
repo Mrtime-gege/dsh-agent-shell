@@ -171,7 +171,9 @@ the profile composition for you. Restart `dsh web` once.
   there is no timeout or auto-release (only a manual lock ends it). Read-only tools
   (`shell_read`/`shell_state`/`shell_audit`) are unaffected. This is **not a security boundary**
   — it only stops two parties typing into the same terminal at once; authorization still governs
-  what the AI may execute.
+  what the AI may execute. Human actions are recorded truthfully: unlock/lock each produce an
+  audit record (`event:'panel-lock'`), and panel input was already audited via `/keys`
+  (`event:'input', source:'panel'`) — nothing more is logged.
 * **Data directory**: audit logs and output recordings live under
   `${DSH_HOME:-~/.dsh}/agent-shell/` (`audit/` for the hash-chained log, `output/` for
   per-session terminal recordings when enabled). Move it via the `auditDir` setting (absolute
@@ -210,9 +212,10 @@ shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "ke
 ## HTTP endpoints
 
 Same-origin, `127.0.0.1`, **unauthenticated**:
-`GET /plugins/shell/{list, screen, audit, consent, settings, diagnose, debugctl}`,
-`POST /plugins/shell/{keys, new, kill, resize, rename}`; `/consent` and `/settings` also accept
-writes (POST). All write requests must be JSON (`content-type: application/json`), enforced by
+`GET /plugins/shell/{list, screen, audit, actors, consent, settings, diagnose, debugctl}`,
+`POST /plugins/shell/{keys, new, kill, resize, rename, busy}`; `/consent` and `/settings` also
+accept writes (POST), and `/busy` carries the human-in-the-loop marker (panel unlock/lock → write
+tools paused). All write requests must be JSON (`content-type: application/json`), enforced by
 the browser-side fence.
 
 ## Known limits
