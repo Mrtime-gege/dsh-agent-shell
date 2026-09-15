@@ -1327,6 +1327,13 @@ const idOf = async (label, callFn) => {
   check(inputRec !== undefined && inputRec.text === 'echo audit-marker-555', `模型输入被记下：${JSON.stringify(inputRec?.text)}`)
   check(inputRec !== undefined && inputRec.guard === 'allowed' && inputRec.source === 'tool', `记下了护栏决策与来源：guard=${inputRec?.guard} source=${inputRec?.source}`)
 
+  // 0.2.2 修复：shell_run 是**第三条输入入口**（此前完全不进审计 —— 长链测试实测 find/cat/top 消失）
+  await run('shell_run', { session: auditId, command: 'echo run-audit-marker-999' }, EXEC)
+  await settle()
+  const runRec = readLines().filter((r) => r.event === 'input' && r.shell === auditId).find((r) => String(r.text ?? '').includes('run-audit-marker-999'))
+  check(runRec !== undefined && runRec.source === 'tool' && runRec.guard === 'allowed',
+    `shell_run 的命令也进审计：${JSON.stringify({ text: runRec?.text?.slice(0, 30), guard: runRec?.guard, source: runRec?.source })}`)
+
   // 2) 面板路径：人的键击同样留痕（这是修复前完全查不到的那一半）
   const panelSend = await call('/keys', 'POST', { name: await idOf('dsh-audit-model'), text: 'echo panel-typed', keys: ['Enter'] })
   check(panelSend.code === 200, `面板发键 → HTTP ${panelSend.code}`)
