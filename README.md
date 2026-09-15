@@ -195,6 +195,18 @@ shell_read  { "session": "dsh-build" }
 摘要），删一条、改一个字节、调换顺序都会断链，`shell_audit` 与面板 ⓘ 会如实显示「链✓」或
 「链⚠断」。
 
+**三个输入入口，一个都不漏**：进入终端的路径只有三条 —— 工具 `shell_send`、工具 `shell_run`
+（"发命令→等空闲→收输出"）、面板的逐键输入（`/keys`）。三者**全部**记账（含被护栏拦下、被
+人机互斥拦下的**企图**：只记成功的审计等于把最该看的那些藏起来）。终端输出另有 `output/` 留痕。
+
+**封链细节**（决定了它有多可靠）：
+- **每条记录即时封链**：写入时就对"上一条摘要 + 本条内容"算一次 SHA-256，不是攒批延迟计算；
+  单条哈希是微秒级开销，可忽略。真正的成本是**启动时整链校验一次**（随日志规模线性，可用保留期控制）。
+- **按天分文件**：`audit-YYYY-MM-DD.jsonl`，同目录并存；保留期到期自动清理旧文件。
+- **不向前兼容（0.2.2 起）**：每条记录都必须带 `prevHash`/`hash`，缺任何一条都**当场报断链**。
+  从旧版本升级时请**清空旧审计**（`rm ~/.dsh/agent-shell/audit-*.jsonl` 后重启），否则旧格式记录
+  会被如实判为断链——这是刻意的：宁可报断链，也不假装"没哈希的记录也算数"。
+
 审计目录默认是普通目录（`~/.dsh/agent-shell`），**默认路径 = 篡改可检测**。想要升级为
 **不可篡改**，可选加锁（内核级 append-only，需要 root 一次性执行）：
 
@@ -234,6 +246,18 @@ sudo chattr -a ~/.dsh/agent-shell   # 后悔时解除（同样需要 sudo）
 - **通知 A**：命令跑完状态点闪 3 秒「刚结束」，新输出亮 `+N 行` 徽标 —— 纯面板内视觉，不打扰。
 - **UI**：无 shell 时下拉按钮保持两排（父容器不跳高）；下拉菜单与触发按钮左对齐。
 - **仅支持 Linux**（含 WSL2/容器）：详见上方「环境要求」的平台声明。
+- **设置里可调的参数**（DSH 设置 → 插件 → dsh-agent-shell）：`shell`、`shellArgs`（启动参数）、
+  `sessionEnv`（会话环境变量）、`cols`/`rows`、`historyLimit`、`maxSessions`、`defaultCwd`、
+  `extendedKeys`、`watchdog`、`watchdogStrategy`（lease-node / sh-lowmem）、`watchdogGraceMs`、
+  `watchdogRenewMs`、`panelPollMs`（面板轮询节奏，经 `/list` 下发给面板）、`guardDangerousCommands`、
+  `requireConsent`、`consentTimeoutSeconds`/`consentRetryCooldownSeconds`、`audit`、
+  `auditRetentionDays`、`captureOutput`/`captureMaxBytes`、`auditDir`、`auditLockReminder`、
+  `allowedHosts`、`socket`/`httpBase` 等。改完哪些"立即生效"、哪些"需重启"，设置卡片上都有标记。
+- **审计完整性修复（实机长链测试发现）**：① `shell_run` 曾是**不入审计的第三条输入入口**
+  （`find`/`cat`/`top` 这类命令在审计里查不到）—— 现已补齐（成功/被拒都记账）；② 封链写入**并发**
+  时两条记录会都从同一个旧摘要起算 → **断链**（`capture` 与 `open` 并发实测复现）—— 现已串行化，
+  并有并发回归测试（并发 5 条封链必须完整）。
+- **审计不再向前兼容**：每条记录必须带哈希，缺一条即判断链；升级请清空旧审计日志（见「审计」节）。
 
 ## 最近更新（0.2.1）
 

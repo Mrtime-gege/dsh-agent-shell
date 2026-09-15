@@ -152,6 +152,15 @@ the profile composition for you. Restart `dsh web` once.
 * **UI**: the shell trigger keeps a two-line layout even with no shells (no container jumping), and
   the dropdown now aligns with the trigger button's left edge.
 * **Linux only** (incl. WSL2/containers): see the platform note under Requirements.
+* **More settings** (DSH Settings → Plugins → dsh-agent-shell): `shellArgs`, `sessionEnv`,
+  `watchdogStrategy` / `watchdogGraceMs` / `watchdogRenewMs`, `panelPollMs` (panel poll cadence,
+  pushed to the browser via `/list`), `auditLockReminder`, plus the existing shell/size/history/
+  consent/audit keys. Each card marks whether a change applies immediately or needs a restart.
+* **Audit integrity fixes found by a real long-chain test**: `shell_run` used to be a third input
+  path that recorded nothing (commands like `find`/`cat`/`top` never appeared in the audit) — now
+  it records success and refusals; and concurrent chain writes could both start from the same old
+  digest (two `prevHash` = genesis → broken chain) — appends are now serialized with a regression
+  test.
 
 ## Recent changes (0.2.1)
 
@@ -177,6 +186,11 @@ the profile composition for you. Restart `dsh web` once.
   key-sorted canonical form, pure JS) — deleting a line, flipping a byte or reordering breaks the
   chain and is reported in `shell_audit` and the panel. Optional one-time `chattr +a` on the audit
   directory upgrades "detectable" to "immutable" (`./install-deps.sh --audit-lock`).
+  **Every record is sealed as it is written** (one hash per record, not batched), files are
+  **per-day** (`audit-YYYY-MM-DD.jsonl`), and since 0.2.2 there is **no backwards compatibility**:
+  a record without a hash is reported as a broken chain, so clear old logs when upgrading
+  (`rm ~/.dsh/agent-shell/audit-*.jsonl`, then restart). **All three input paths are recorded** —
+  `shell_send`, `shell_run` and the panel's `/keys` — including attempts that were refused.
 * **Injection fix**: session/key names interpolated into control-mode commands are whitelisted
   (`^[A-Za-z0-9_-]+$`) and rejected otherwise, closing the "run arbitrary tmux commands via the
   `session` argument" path.
