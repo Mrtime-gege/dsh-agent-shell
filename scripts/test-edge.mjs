@@ -1327,6 +1327,13 @@ const idOf = async (label, callFn) => {
   check(inputRec !== undefined && inputRec.text === 'echo audit-marker-555', `模型输入被记下：${JSON.stringify(inputRec?.text)}`)
   check(inputRec !== undefined && inputRec.guard === 'allowed' && inputRec.source === 'tool', `记下了护栏决策与来源：guard=${inputRec?.guard} source=${inputRec?.source}`)
 
+  // shell_audit 的 session 选择器（mine/*/逗号/单 id）—— 曾经直接透传字符串 → mine 查到 0 条
+  const auditMine = await run('shell_audit', { session: 'mine' }, EXEC)
+  check(String(auditMine).includes('run-audit-marker-999') || /records: [1-9]/.test(String(auditMine)),
+    `shell_audit session=mine 能查到本对话的记录（${String(auditMine).split('\n').find((l) => l.startsWith('records:')) ?? '?'}）`)
+  const auditAll = await run('shell_audit', { session: '*' }, EXEC)
+  check(/records: [1-9]/.test(String(auditAll)), 'shell_audit session=* 返回全部记录')
+
   // 0.2.2：每次工具调用都记一条 tool-call（含只读查询）—— "AI 调过哪些工具"可查
   const beforeToolCalls = readLines().filter((r) => r.event === 'tool-call').length
   await run('shell_state', { scope: 'mine' }, EXEC)
