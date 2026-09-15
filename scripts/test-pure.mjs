@@ -114,8 +114,7 @@ pass(isSafeSessionName('') === false && isSafeSessionName(null) === false, '空/
 pass(isSafeKeyName('C-c') === true && isSafeKeyName('Enter') === true, '合法键名通过')
 pass(isSafeKeyName('C-c; kill-server') === false, '键名注入被拒')
 
-console.log(failed === 0 ? `pure 纯函数：全部通过（${45 + 20} 项断言）` : `pure 纯函数：${failed} 项失败`)
-process.exit(failed === 0 ? 0 : 1)
+
 /* ── parseTmuxVersion（extended-keys ≥3.2 压制的判据）──────────────────────── */
 pass(JSON.stringify(parseTmuxVersion('tmux 3.6b')) === '[3,6]', 'tmux 3.6b → [3,6]')
 pass(JSON.stringify(parseTmuxVersion('tmux 3.2')) === '[3,2]', 'tmux 3.2 → [3,2]')
@@ -124,3 +123,24 @@ pass(JSON.stringify(parseTmuxVersion('tmux 4.9')) === '[4,9]', '未来大版本�
 pass(parseTmuxVersion('command not found: tmux') === null, '非 tmux 输出 → null（能力未知）')
 pass(parseTmuxVersion('') === null, '空输出 → null')
 pass(parseTmuxVersion(undefined) === null, 'undefined → null')
+
+/* ── 并发封链不得断链（0.2.2 真机抓到：capture 与 open 并发都读旧 head → 双写 genesis → prev-mismatch）── */
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { appendAudit, readAudit, GENESIS as AUDIT_GENESIS } from '../lib/audit.js'   // verifyChain 已在头部导入
+{
+  const dir = mkdtempSync(join(tmpdir(), 'audit-race-'))
+  const paths = { dir, input: (d) => join(dir, `audit-${d}.jsonl`) }
+  const chain = { head: AUDIT_GENESIS, seq: 0 }
+  // Promise.all 并发 5 条：修复前两条会都写 prevHash=genesis → 断链；串行化后必须完整
+  await Promise.all([1, 2, 3, 4, 5].map((i) => appendAudit(paths, '2026-01-01', { event: 'race-' + i, ts: i }, chain)))
+  const recs = await readAudit(paths, '2026-01-01')
+  const verdict = verifyChain(recs)
+  pass(recs.length === 5 && verdict.ok === true,
+    `并发 5 条封链不断链（${recs.length} 条，${verdict.ok ? '链完整' : JSON.stringify(verdict.brokenAt)}）`)
+  const chainTail = chain.head
+  pass(chainTail === recs[recs.length - 1].hash, '链头推进到最后一条的 hash')
+}
+
+console.log(failed === 0 ? `pure 纯函数：全部通过（74 项断言）` : `pure 纯函数：${failed} 项失败`)
+process.exit(failed === 0 ? 0 : 1)
