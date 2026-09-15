@@ -29,6 +29,40 @@
 - **README**：明确**仅支持 Linux（含 WSL2 / 容器）**——tmux、`/proc` 前台判定、systemd 看门狗、
   `chattr` 加锁全是 Linux 专有；macOS/Windows 原生不受支持（不在"待适配"范围）。
 
+### 0.2.2 补充：AI 提示优化 + 收敛清理 + 能力探测 + 看门狗重构（同一版本，一次发布）
+
+- **AI 提示优化（S0）**：工具描述完整列出参数/键名/行为与失败语义（shell_wait 的三种 until、
+  shell_send 的合法键名等）；报错定位问题并给"怎么办"—— 会话 id 不存在 → "用 shell_state 查
+  现有稳定 id（label 不是 id）"；shell_wait 的 until/timeout 不合法 → **立即 REFUSED 并说明**，
+  不再空等 30 秒。
+- **守卫收敛（S1/A1）**：DANGEROUS 删除 5 条 —— `sudo/doas/su`（提权是本插件主场景）与状态目录
+  三组 + `rm ~/.dsh`（原生 bash 旁路存在，拦"写自己家目录"纯属误伤；留痕完整性由哈希链承担）；
+  保留的规则注释归类为"可用性/发布纪律"而非"安全"。
+- **注入防回归（S1/A2）**：新增 `scripts/test-injection.mjs`（零依赖 grep）—— 断言控制命令模板里
+  每个 `-t ${…}` 都包在 `safeTarget(` 内、`send-keys` 键名插值只来自 `keyList.join`（上游已
+  isSafeKeyName），并重放 0.2.1 的 PoC 载荷。补上了"白名单本身很稳，但拼接点忘了包"这一层。
+- **extended-keys 版本压制（S1/A4）**：`tmux -V` 解析出版本（`parseTmuxVersion`，可单测）；配置为开
+  但版本 <3.2（或探测不到）时**自动压制**并如实上报（面板 ⓘ / /diagnose / 启动日志），消灭
+  "开了却不起效/一开服务端起不来"。
+- **tmpdir 修复（S2/B3a）**：`confFile`/`pidFile`/租约文件从硬编码 `/tmp` 改 `os.tmpdir()`——
+  Android/Termux 无 /tmp 的正确性修复（macOS 同样受益），Linux 行为不变。
+- **能力探测与降级（S3/B 流）**：新增 `lib/env.mjs` —— 只探能力信号（tmux/systemd-user//proc/
+  Termux），不探平台名；`planFor` 决议四档（服务端启动 / 看门狗 / harness 定位 / extended-keys /
+  前台判定），`describeEnv` 给每档一句**人话收缩承诺**。分叉点：无 systemd → 普通 detach（承诺：
+  "dsh 干净重启后会话不再存活"）；读不到 /proc → 前台原值显示（嵌套 tmux 忙闲判定退化）。每条
+  降级记 `env-degraded` 审计封链；/diagnose、/list、`shell_state`、面板 ⓘ 如实上报。
+- **install-deps.sh Termux 分支（S3/B3b）**：`$PREFIX` 命中 + 有 `pkg` → `pkg install -y tmux`
+  （无 sudo）；不落到必然失败的 apt/sudo 分支。
+- **看门狗重构（S4/C 流）**：新增 `lib/watchdog.mjs` 独立 Node 程序（`detached:true`+`unref` =
+  程序化 setsid，全类 Unix 一致）+ **租约文件通信**（harness 每 8s 原子重写 `<socket>-watchdog.lease`；
+  续租 token 不变、热重载**收养**沿用同一租约）。判定**双条件**：租约过期 ∧（读不到 /proc → 直接收；
+  进程还活着 → 冻结 → 不杀）。策略随租约动态生效。pid 文件两字段格式与 `readWatchdogState` API
+  不变（迁移零成本）。原 sh 循环保留为显式选项 `watchdogStrategy: 'sh-lowmem'`（低内存设备，~1MB，
+  注 RSS 差异如实写在配置描述）。CI：`shouldReap` 纯函数三判定 + 参数一致性 + 真行为（收/不收）。
+- **SECURITY.md 随包发布（S1/A3）**：`docs/SECURITY.md` 进 npm `files` 白名单（装包即见安全边界）。
+- **测试**：新增 `test-injection`（5 断言）/ `test-env`（四矩阵 + 降级路径真跑主干）/
+  `test-watchdog`（行为断言+参数一致性）；全部并入 `npm test` 链。
+
 ## 0.2.1 — 审计不可篡改 + 详情整合 + 按对话授权
 
 - **审计哈希链（可审计且不可篡改的第一层）**：每条审计记录携带 `prevHash`+`hash`（SHA-256，

@@ -38,6 +38,9 @@ miss() { printf '  [missing] %s\n' "$*"; }
 note() { printf '  [note]    %s\n' "$*"; }
 
 detect_pm() {
+  # Termux（Android）要**最先**判：它自带 apt 命令，但那是 pkg 的包装、且**没有 sudo** ——
+  # 落到 apt 分支会给出必然失败的 `sudo apt-get install`（B3b 修复）。
+  if [ -n "${PREFIX:-}" ] && command -v pkg >/dev/null 2>&1; then echo pkg; return; fi
   if command -v brew >/dev/null 2>&1; then echo brew; return; fi
   if command -v apt-get >/dev/null 2>&1; then echo apt; return; fi
   if command -v dnf >/dev/null 2>&1; then echo dnf; return; fi
@@ -50,6 +53,7 @@ detect_pm() {
 
 install_cmd_for() {   # $1 = package
   case "$(detect_pm)" in
+    pkg)    echo "pkg install -y $1" ;;   # Termux：无 sudo
     brew)   echo "brew install $1" ;;
     apt)    echo "sudo apt-get update && sudo apt-get install -y $1" ;;
     dnf)    echo "sudo dnf install -y $1" ;;

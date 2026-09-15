@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  NAME_PREFIX, DANGEROUS, scanDanger, sanitizeName, clamp,
+  NAME_PREFIX, DANGEROUS, scanDanger, sanitizeName, clamp, parseTmuxVersion,
 } from '../lib/pure.mjs'
 // tmux.js 零 DSH 依赖（只引 node:fs/promises 与 node:child_process）—— 纯逻辑可离线测
 import { drillForeground, normalizeReply, readDescendantProcs } from '../lib/tmux.js'
@@ -32,7 +32,9 @@ pass(clamp('80', 24, 20, 1000) === 24, '数字字符串按非有限值回退（�
 /* ── scanDanger ──────────────────────────────────────────────────────────── */
 pass(scanDanger('rm -rf /') !== null, 'rm -rf / 命中')
 pass(scanDanger('echo hello') === null, '普通命令放行')
-pass(scanDanger('sudo apt install tmux') !== null, '提权字样命中（守卫的速阻语义）')
+pass(scanDanger('sudo apt install tmux') === null, 'sudo 不再命中（0.2.2 起提权是主场景，规则已删）')
+pass(scanDanger('echo hello > ~/.dsh/agent-shell/audit-2026-01-01.jsonl') === null, '写状态目录不再被拦（误伤；留痕完整性由哈希链承担）')
+pass(scanDanger('rm -rf ~/.dsh/agent-shell') === null, '删状态目录不再被拦（原生 bash 旁路存在，不做假边界；哈希链负责可检测）')
 pass(scanDanger('tmux kill-server') !== null, '杀私有服务端命中（插件命门）')
 pass(scanDanger('tmux kill-session -t nest') !== null, 'kill-session 命中')
 pass(scanDanger('unset TMUX; tmux attach -t nest') === null, '嵌套 tmux 的正常操作放行')
@@ -41,7 +43,7 @@ pass(scanDanger('x', [{ pattern: /x/, reason: 'r' }]) === 'r', '自定义规则�
 pass(scanDanger('', ) === null, '空文本放行')
 
 /* ── DANGEROUS 数量锚定（加规则必须显式更新这里，防静默增删）────────────── */
-pass(DANGEROUS.length === 20, `危险规则数稳定（${DANGEROUS.length}）—— 增删需同步 SECURITY.md 与测试`)
+pass(DANGEROUS.length === 15, `危险规则数稳定（${DANGEROUS.length}）—— 增删需同步 SECURITY.md 与测试`)
 
 /* ── 前台钻穿（drillForeground：sudo/su 包装器，纯进程表穷举）────────────────── */
 const tree = (spec) => {
@@ -112,3 +114,11 @@ pass(isSafeKeyName('C-c; kill-server') === false, '键名注入被拒')
 
 console.log(failed === 0 ? `pure 纯函数：全部通过（${45 + 20} 项断言）` : `pure 纯函数：${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
+/* ── parseTmuxVersion（extended-keys ≥3.2 压制的判据）──────────────────────── */
+pass(JSON.stringify(parseTmuxVersion('tmux 3.6b')) === '[3,6]', 'tmux 3.6b → [3,6]')
+pass(JSON.stringify(parseTmuxVersion('tmux 3.2')) === '[3,2]', 'tmux 3.2 → [3,2]')
+pass(JSON.stringify(parseTmuxVersion('tmux 3.1a')) === '[3,1]', 'tmux 3.1a → [3,1]（<3.2 应压制 extended-keys）')
+pass(JSON.stringify(parseTmuxVersion('tmux 4.9')) === '[4,9]', '未来大版本照常解析')
+pass(parseTmuxVersion('command not found: tmux') === null, '非 tmux 输出 → null（能力未知）')
+pass(parseTmuxVersion('') === null, '空输出 → null')
+pass(parseTmuxVersion(undefined) === null, 'undefined → null')

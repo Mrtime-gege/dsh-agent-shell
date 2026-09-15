@@ -28,7 +28,8 @@
     "install-deps.sh",
     "README.md",
     "README.en.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/SECURITY.md"
   ],
   "engines": {
     "node": ">=20"
@@ -40,13 +41,14 @@
     "check": "node --check lib/index.js && node --check lib/tmux.js && node --check lib/client.js",
     "test:client": "node scripts/test-client.mjs",
     "test:edge": "node scripts/test-edge.mjs",
-    "test": "node scripts/test-pure.mjs && node scripts/test-consent.mjs && node scripts/test-client.mjs && node scripts/test-edge.mjs",
+    "test": "node scripts/test-pure.mjs && node scripts/test-injection.mjs && node scripts/test-consent.mjs && node scripts/test-client.mjs",
     "release:check": "node scripts/release-check.mjs",
     "leak:history": "node scripts/scan-history.mjs",
     "prepublishOnly": "npm run check && npm run release:check",
     "smoke": "node scripts/smoke.mjs",
     "test:consent": "node scripts/test-consent.mjs",
-    "test:pure": "node scripts/test-pure.mjs"
+    "test:pure": "node scripts/test-pure.mjs",
+    "test:injection": "node scripts/test-injection.mjs"
   },
   "dsh": {
     "bundle": {
