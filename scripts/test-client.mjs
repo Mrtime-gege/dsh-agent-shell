@@ -257,7 +257,7 @@ if (typeof infoRows === 'function') {
       audit: {
         enabled: true, dir: '/tmp/dsh-audit', retentionDays: 30, note: '',
         capture: true, captureMaxBytes: 67108864, captureStopped: [],
-        chain: { ok: true, sealed: 12, legacy: 2, startUnknown: false, brokenAt: null, head: 'abc123', checkedAt: 0 },
+        chain: { ok: true, sealed: 12, startUnknown: false, brokenAt: null, head: 'abc123', checkedAt: 0 },
         locked: 'append-only',
       },
       // 能力与降级（env.mjs describeEnv 的人话承诺），详情页「系统」卡要原样显示
@@ -310,7 +310,7 @@ if (typeof infoRows === 'function') {
   {
     const broken = infoRows({
       server: { audit: { enabled: true, dir: '/x', retentionDays: 30,
-        chain: { ok: false, brokenAt: { index: 4, reason: 'hash-mismatch', ts: 1 }, sealed: 4, legacy: 0, startUnknown: false },
+        chain: { ok: false, brokenAt: { index: 4, reason: 'hash-mismatch', ts: 1 }, sealed: 4, startUnknown: false },
         locked: 'writable' } },
       meta: null, sessions: [], historyLocked: true,
     }).flatMap((g) => g.rows).find((r) => r.k === '审计链')

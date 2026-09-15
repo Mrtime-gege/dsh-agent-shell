@@ -96,10 +96,12 @@ pass(verifyChain([s1, s2]).ok === true, '完整链校验通过')
 pass(verifyChain([s1, s2]).sealed === 2, '封链计数正确')
 pass(verifyChain([s1, { ...s2, text: 'y' }]).ok === false, '中间篡改 → 断链')
 pass(verifyChain([s1, s2]).brokenAt === null, '完整链无断点')
-const legacy = { ts: 0, event: 'open', shell: 'old' }
-const mix = verifyChain([legacy, s1, s2])
-pass(mix.ok === true && mix.legacy === 1, '历史(未封链)记录跳过，不判断链')
-pass(chainHeadOf([legacy, s1, s2]) === s2.hash, '链头取最后一条封链摘要')
+const legacyRec = { ts: 0, event: 'open', shell: 'old' }
+// 0.2.2 起不向前兼容：未封链记录直接判断链（unsealed），不再容忍
+const strict = verifyChain([legacyRec, s1, s2])
+pass(strict.ok === false && strict.brokenAt?.index === 0 && strict.brokenAt?.reason === 'unsealed',
+  '未封链（旧格式）记录直接判断链 —— 升级时已清空旧日志，不再向前兼容')
+pass(chainHeadOf([legacyRec, s1, s2]) === s2.hash, '链头取最后一条封链摘要')
 pass(chainHeadOf([]) === GENESIS, '空链 → 创世')
 /* 注入白名单 */
 import { isSafeSessionName, isSafeKeyName } from '../lib/pure.mjs'
