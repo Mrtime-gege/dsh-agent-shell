@@ -219,7 +219,7 @@ mod.apply(ctx, {
 })
 
 check(tools.size === 10, `注册工具数 = ${tools.size}（期望 10——v2 工具面）`)
-check(routes.size === 11, `注册 HTTP 路由数 = ${routes.size}（期望 11）`)
+check(routes.size === 14, `注册 HTTP 路由数 = ${routes.size}（期望 14：list/screen/audit/consent/settings/diagnose/debugctl/keys/new/kill/resize/rename/busy/actors）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
 {
@@ -231,9 +231,16 @@ check(routes.size === 11, `注册 HTTP 路由数 = ${routes.size}（期望 11）
   check(probe.includes('结论：'), `给出明确结论：${probe.split('\n').filter((l) => l.startsWith('结论')).join(' ')}`)
 }
 
-await new Promise(r => setTimeout(r, 300))
-const conf = readFileSync(`/tmp/${SOCKET}-tmux.conf`, 'utf8')
-check(conf.includes('extended-keys on'), 'extendedKeys: true 已写进服务端启动配置')
+// conf 由「首次会话创建时的 writeServerConfig」写入；0.2.2 起那一步在 ready（env 探测+tmux 体检）之后，
+// 所以这里轮询等它出现（tmux ≥3.2 时 extended-keys 应写入；版本压制逻辑也在这里被验证）
+let conf = ''
+for (let i = 0; i < 150; i += 1) {
+  const p = `/tmp/${SOCKET}-tmux.conf`
+  conf = existsSync(p) ? readFileSync(p, 'utf8') : ''
+  if (conf.includes('extended-keys on')) break
+  await new Promise(r => setTimeout(r, 100))
+}
+check(conf.includes('extended-keys on'), 'extendedKeys: true 且 tmux ≥3.2 → 已写进服务端启动配置')
 
 const opened = await run('shell_open', { name: 'smoke', cols: 90, rows: 24 })
 const session = (opened.match(/session (\S+)/) ?? [])[1]
@@ -324,7 +331,7 @@ if (hasHarness) {
 }
 
 // (2) pid 文件记着「别的 harness」+ 服务端上有活会话 → 必须收养，不许清
-await run('shell_open', { name: 'keepme', cols: 80, rows: 24 })
+const openKeep = await run('shell_open', { name: 'keepme', cols: 80, rows: 24 })
 execFileSync('sh', ['-c', `printf '%s\\n' '999999 424242' > ${pidFile}`])
 const boot = await driver.bootstrap()
 const kept = await call('/list', 'GET')
@@ -332,7 +339,8 @@ check(boot.adopted === false && boot.kept.length >= 1, `bootstrap 报告保住�
 check(kept.body?.sessions?.length === 1, `pid 文件指向别的 harness 时，会话仍在（${kept.body?.sessions?.length} 个）`)
 if (hasHarness) check(boot.watchdogPid !== '', `重新布防了看门狗：pid ${boot.watchdogPid}`)
 else console.log('  · 无 harness 祖先，跳过「看门狗已重新布防」断言（布防本就无法进行）')
-await run('shell_manage', { action: 'close', session: keepmeId })
+const keepId = (String(openKeep).match(/session (\S+)/) ?? [])[1]
+await run('shell_manage', { action: 'close', session: keepId })
 
 // (3) 看门狗静默死亡 → 下一次操作必须自愈重布防（节流窗口 5 秒，故先等过去）
 if (hasHarness) {
