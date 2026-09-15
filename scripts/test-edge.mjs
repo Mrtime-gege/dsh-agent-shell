@@ -1327,6 +1327,16 @@ const idOf = async (label, callFn) => {
   check(inputRec !== undefined && inputRec.text === 'echo audit-marker-555', `模型输入被记下：${JSON.stringify(inputRec?.text)}`)
   check(inputRec !== undefined && inputRec.guard === 'allowed' && inputRec.source === 'tool', `记下了护栏决策与来源：guard=${inputRec?.guard} source=${inputRec?.source}`)
 
+  // 0.2.2：每次工具调用都记一条 tool-call（含只读查询）—— "AI 调过哪些工具"可查
+  const beforeToolCalls = readLines().filter((r) => r.event === 'tool-call').length
+  await run('shell_state', { scope: 'mine' }, EXEC)
+  await run('shell_read', { session: auditId, lines: 3 }, EXEC)
+  await settle()
+  const toolCalls = readLines().filter((r) => r.event === 'tool-call')
+  const names = new Set(toolCalls.map((r) => r.tool))
+  check(toolCalls.length > beforeToolCalls && names.has('shell_state') && names.has('shell_read'),
+    `只读工具调用也进审计（tool-call：${[...names].join(',')}）`)
+
   // 0.2.2 修复：shell_run 是**第三条输入入口**（此前完全不进审计 —— 长链测试实测 find/cat/top 消失）
   await run('shell_run', { session: auditId, command: 'echo run-audit-marker-999' }, EXEC)
   await settle()
