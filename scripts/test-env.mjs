@@ -79,8 +79,23 @@ const mkIO = ({ tmuxV = 'tmux 3.6b', tmuxOk = true, systemdRun = true, systemdDi
 /* ── 2. 降级路径真跑主干（driver 拨档后 open→send→capture→close）────────────── */
 
 const tgz = packIntoTemp()
-const h = await makeHarness({ tgz, peersDir, socket: process.env.DSH_TEST_SOCKET_ENV ?? 'dsh-kit-env', config: { watchdog: false, __consentMode: 'ok' } })
+const h = await makeHarness({ tgz, peersDir, socket: process.env.DSH_TEST_SOCKET_ENV ?? 'dsh-kit-env', config: {
+  watchdog: false, __consentMode: 'ok',
+  // 用户可调参数的真实消费（0.2.2）：会话环境变量 / 启动参数 / 面板轮询档 / 审计加锁提醒开关
+  sessionEnv: ['DSH_TEST_ENV=hello42'], shellArgs: ['--norc', '--noprofile'], panelPollMs: 500, auditLockReminder: true,
+} })
 
+{
+  // 可调参数消费：会话里能看到 sessionEnv；shellArgs 不影响基本使用
+  const envShell = await h.run('shell_open', { name: 'env-cfg' }, { agent: { session: { id: 'env-conv' } } })
+  const envId = (String(envShell).match(/session (\S+)/) ?? [])[1]
+  const envOut = await h.run('shell_run', { session: envId, command: 'echo GOT=$DSH_TEST_ENV' }, { agent: { session: { id: 'env-conv' } } })
+  check(String(envOut).includes('GOT=hello42'), `sessionEnv 注入到新会话环境（${String(envOut).split('\n').slice(-2)[0] ?? ''}）`)
+  const uiInfo = (await h.call('/list', 'GET')).body.server
+  check(uiInfo?.ui?.pollMs === 500, `panelPollMs 经 /list 下发（ui.pollMs=${uiInfo?.ui?.pollMs}）`)
+  check(uiInfo?.auditLockReminder === true, 'auditLockReminder 下发到面板（开）')
+  await h.run('shell_manage', { action: 'close', session: envId }, { agent: { session: { id: 'env-conv' } } })
+}
 {
   // 降级档 1：plain-detach（不开 systemd scope）——真实 spawm tmux 普通路径
   h.driver.serverLaunch = 'plain-detach'

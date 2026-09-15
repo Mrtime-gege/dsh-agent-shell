@@ -63,6 +63,18 @@
 - **测试**：新增 `test-injection`（5 断言）/ `test-env`（四矩阵 + 降级路径真跑主干）/
   `test-watchdog`（行为断言+参数一致性）；全部并入 `npm test` 链。
 
+### 0.2.2 补充：更多用户可调参数（设置页）
+
+- **`sessionEnv`**：给新会话注入环境变量（`["EDITOR=vim"]` 形式），解决"会话环境被锁死在
+  PATH/HOME/TERM/LANG 四项"的缺口；非法项忽略。立即生效（只影响新会话）。
+- **`shellArgs`**：会话启动参数（如 `["--norc","--noprofile"]`），追加在 shell 之后。立即生效。
+- **`watchdogRenewMs`**：看门狗续租周期（默认 8000ms，与 `watchdogGraceMs` 配对调慢盘/低配机器）。需重启。
+- **`panelPollMs`**：面板空闲轮询间隔（默认 800ms，快档自动取 1/4）；**经 `/list` 下发**给客户端
+  （`server.ui.pollMs`），改设置即生效，不必只顾服务器。
+- **`auditLockReminder`**：打开后，审计未加锁时面板 ⓘ「安全」卡首行醒目提示（默认关，不打扰）。
+- 同时修掉 env 探测直连 `execFile('tmux')` 在 harness 沙箱失败导致误报"看门狗关闭/extended-keys
+  压制"的 bug：tmux 能力改由 driver（subprocess 服务）探测，在 `state.ready` 顺序融合重算。
+
 ## 0.2.1 — 审计不可篡改 + 详情整合 + 按对话授权
 
 - **审计哈希链（可审计且不可篡改的第一层）**：每条审计记录携带 `prevHash`+`hash`（SHA-256，

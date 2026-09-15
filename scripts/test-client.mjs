@@ -265,6 +265,9 @@ if (typeof infoRows === 'function') {
       plan: { serverLaunch: 'systemd-scope', watchdog: 'lease-node', harnessPid: 'proc-chain', extendedKeys: true, foreground: 'drill' },
       envNotes: ['服务器启动：systemd 用户 scope（dsh 干净重启后会话仍存活）', 'extended-keys：启用（tmux ≥ 3.2）'],
       tmux: { ok: true, version: 'tmux 3.6b', extKeys: 'on' },
+      // 面板可调项 + 审计加锁提醒（本 fixture 已加锁 append-only → 提醒不应出现）
+      ui: { pollMs: 500 },
+      auditLockReminder: true,
     },
     meta: { name: 'dsh-build', cols: 120, rows: 32, foreground: 'make', attached: false, historySize: 178, historyLimit: 100000, historyBytes: 40960 },
     sessions: [{ name: 'dsh-build' }], historyWindow: 200, maxWindow: 5000,
@@ -314,6 +317,18 @@ if (typeof infoRows === 'function') {
     check(broken !== undefined && broken.v.startsWith('⚠') && broken.v.includes('第 5 条'),
       `断链在详情里显式告警：${broken ? broken.v : '(缺失)'}`)
     check(broken !== undefined && broken.tone === 'warn', '断链行标成告警色')
+    // 审计加锁提醒：设置打开且未加锁（locked !== 'append-only'）时才出现
+    const reminder = infoRows({
+      server: { audit: { enabled: true, dir: '/x', retentionDays: 30, locked: 'writable' }, auditLockReminder: true },
+      meta: null, sessions: [], historyLocked: true,
+    }).flatMap((g) => g.rows).find((r) => r.k === '审计加锁提醒')
+    check(reminder !== undefined && reminder.tone === 'warn' && reminder.v.includes('未加锁'),
+      `审计加锁提醒在未加锁时出现：${reminder ? reminder.v : '(缺失)'}`)
+    const noReminder = infoRows({
+      server: { audit: { enabled: true, dir: '/x', retentionDays: 30, locked: 'append-only' }, auditLockReminder: true },
+      meta: null, sessions: [], historyLocked: true,
+    }).flatMap((g) => g.rows).some((r) => r.k === '审计加锁提醒')
+    check(noReminder === false, '已加锁（append-only）时**不**显示加锁提醒')
   }
 
   // 最要紧的一组：字段全缺 / 半缺时不许抛错，也不许出现 undefined
