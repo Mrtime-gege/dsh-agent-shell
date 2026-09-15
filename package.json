@@ -29,7 +29,8 @@
     "README.md",
     "README.en.md",
     "LICENSE",
-    "docs/SECURITY.md"
+    "docs/SECURITY.md",
+    "bin"
   ],
   "engines": {
     "node": ">=20"
@@ -98,5 +99,8 @@
     "react": {
       "optional": true
     }
+  },
+  "bin": {
+    "dsh-agent-shell": "bin/dsh-agent-shell.mjs"
   }
 }

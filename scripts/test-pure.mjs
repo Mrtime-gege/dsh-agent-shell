@@ -127,7 +127,7 @@ pass(parseTmuxVersion(undefined) === null, 'undefined → null')
 /* ── 并发封链不得断链（0.2.2 真机抓到：capture 与 open 并发都读旧 head → 双写 genesis → prev-mismatch）── */
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { appendAudit, readAudit, GENESIS as AUDIT_GENESIS } from '../lib/audit.js'   // verifyChain 已在头部导入
+import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } from '../lib/audit.js'   // verifyChain 已在头部导入
 {
   const dir = mkdtempSync(join(tmpdir(), 'audit-race-'))
   const paths = { dir, input: (d) => join(dir, `audit-${d}.jsonl`) }
@@ -140,6 +140,11 @@ import { appendAudit, readAudit, GENESIS as AUDIT_GENESIS } from '../lib/audit.j
     `并发 5 条封链不断链（${recs.length} 条，${verdict.ok ? '链完整' : JSON.stringify(verdict.brokenAt)}）`)
   const chainTail = chain.head
   pass(chainTail === recs[recs.length - 1].hash, '链头推进到最后一条的 hash')
+  // 展示层：tool-call 必须打出工具名（"AI 调过哪些工具"全靠这个字段）
+  pass(summarizeRecord({ ts: 0, event: 'tool-call', tool: 'shell_state', session: 'mine' }).includes('shell_state'),
+    'tool-call 摘要带工具名与 session')
+  pass(summarizeRecord({ ts: 0, event: 'env-degraded', capability: 'systemd-user', fallback: 'plain-detach' }).includes('plain-detach'),
+    'env-degraded 摘要带降级去向')
 }
 
 console.log(failed === 0 ? `pure 纯函数：全部通过（74 项断言）` : `pure 纯函数：${failed} 项失败`)

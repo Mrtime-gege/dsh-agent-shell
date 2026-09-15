@@ -102,6 +102,7 @@ if (files.length === 0) {
  */
 const PUBLISH_WHITELIST = [
   'lib',
+  'bin',
   'cordis.patch.yml',
   'install-deps.sh',
   'README.md',
@@ -110,7 +111,7 @@ const PUBLISH_WHITELIST = [
   'docs/SECURITY.md'   // 安全说明随包：装包的人不该为了看安全边界去翻仓库
 ]
 // 少了这些，装包的人要么跑不起来、要么看不懂怎么装
-const PUBLISH_REQUIRED = ['lib', 'cordis.patch.yml', 'install-deps.sh', 'README.md', 'README.en.md', 'LICENSE', 'docs/SECURITY.md']
+const PUBLISH_REQUIRED = ['lib', 'bin', 'cordis.patch.yml', 'install-deps.sh', 'README.md', 'README.en.md', 'LICENSE', 'docs/SECURITY.md']
 for (const entry of PUBLISH_REQUIRED) {
   if (!files.includes(entry)) fail(`files 白名单缺少必要文件：${entry}`)
 }

@@ -1,302 +1,118 @@
 # dsh-agent-shell
 
-> Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness — 10 model tools plus a draggable floating panel you can actually type into.
+> Persistent multi-shell terminal for DeepSeek Harness: 10 model tools + a draggable, type-able floating panel.
 
 [![npm version](https://img.shields.io/npm/v/dsh-agent-shell.svg)](https://www.npmjs.com/package/dsh-agent-shell)
 [![npm license](https://img.shields.io/npm/l/dsh-agent-shell.svg)](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![CI](https://github.com/Mrtime-gege/dsh-agent-shell/actions/workflows/ci.yml/badge.svg)](https://github.com/Mrtime-gege/dsh-agent-shell/actions/workflows/ci.yml)
 
-[中文（主文档）](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md) · **English**
+[**English**](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.en.md) · [**中文**](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md)
 
-## Declarations (read these three, then decide)
+## ⚠️ Read the risks first
 
-1. **This plugin was developed by AI, with no human audit.** Design and implementation came from an AI, backed by 450+ automated assertions across five suites plus real-machine verification (which found and fixed six real bugs) — but **no human security audit**.
-2. **A grant means arbitrary commands.** There is **no approval gate**: once a conversation is granted, its AI can read files, rewrite config, make network calls, install and delete things **with your own user privileges**, and nothing will prompt you.
-3. **It only provides convenient access — not responsibility for the outcome.** It is not a sandbox and not a restricted tool; whether to use it, how far, and what to back up first is your call and your risk.
+This hands a real shell to the AI. It is not a toy and not a sandbox.
 
-> Details on what it does and does not stop: [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md).
+1. **developed by AI, no human audit.** Tested, but never security-reviewed by a human.
+2. **Grant = arbitrary commands.** Once a conversation is granted, its AI can read, modify, send
+   network traffic, install software and **delete things** with your user privileges — there is
+   **no approval gate** and nothing asks you per command. Refuse and it cannot execute.
+3. **No liability.** It provides convenience plus honest recording, not a sandbox. Data loss,
+   prompt-injected destructive commands, credentials showing up in a terminal — your call.
+4. **The only line of defense is a heuristic keyword guard** (`guardDangerousCommands`, on by
+   default): matches `rm -rf /`, `mkfs`, `dd of=/dev/*`, … and is **trivially bypassable and
+   false-positives**. A speed bump, not protection.
+5. **Audit is "detectable", not "immutable" (default)**: the hash chain reveals tampering, but
+   same-privilege AI can modify audit files too; upgrade to append-only with `chattr +a`
+   (`./install-deps.sh --audit-lock`).
+6. **ssh/remote = "tunnel-level" audit only**: keys and screen in/out of the tunnel, not what the
+   remote machine actually did.
+7. **Not for production / multi-user / irreplaceable-data machines.** Back up first.
 
-## When it is worth using (typical cases)
+## One-command install
 
-It solves two problems: **interactive work that needs a real TTY**, and **the cost of starting a process again and again**.
+Linux (incl. WSL2/containers), Node ≥ 20, a running DSH (0.1.5+):
 
-### 1. Interactive command-line tools
+```sh
+npx -y dsh-agent-shell install [--profile web]
+```
 
-DSH's built-in line-oriented tool starts a **fresh, non-interactive process** for every call — anything that
-asks for a password, opens an interactive UI or needs `Ctrl-C` is out of reach for it. This plugin gives you a
-real `bash` inside a real tmux session, so all of the following work directly in the session:
-
-| Case | Why it needs "persistent + TTY" |
-|---|---|
-| **`sudo` privilege escalation** | The password prompt only exists on a TTY; send it once and later commands in that session already run as root — no need to prefix every command |
-| **`ssh` into another machine** | You land in a remote interactive shell and keep working there from the same session (remote output is recorded, but at "recording" fidelity, not effect-level truth) |
-| **`gdb` / `pdb` debugging** | Breakpoints, stepping and inspecting variables are stateful flows — the commands must stay inside one debugger session |
-| **`vim` / `nano` editing** | Full-screen editing needs a TTY and key sequences (`Esc`, `:wq`, mode switches) |
-| **REPLs / database clients** | `python`, `node`, `psql` carry session state (variables, transactions, connections) across calls |
-| **TUI programs** | `htop`, `top`, `tmux` and friends need a full screen and a real window size |
-| **`Ctrl-C` / long-running jobs** | Training, builds and services keep running in the session; switching conversations, hot reloads and quick restarts do not lose them, and the output is still there later |
-
-### 2. Avoiding repeated process startup
-
-* **The session is long-lived**: later operations just feed input into the same session, so there is no
-  re-`cd`, re-`export`, re-`source venv/bin/activate` — working directory, environment and background jobs carry over.
-* **Internally the plugin uses a long-lived tmux control-mode client** (~1ms pipe round-trip, measured) instead of
-  spawning a fresh client per operation (that path costs ~100ms of fixed overhead each time); the difference is
-  most visible for the panel's per-keystroke input and frequent screen reads.
-* Compared with "start a process for every command and exit", what you save is the process startup and
-  environment re-initialisation.
-
-> The reverse also holds: **one-shot, non-interactive commands** (reading files, running a test, `git status`) are
-> better served by DSH's built-in line tool — it starts fast and nobody has to watch it. This plugin is for the
-> work that genuinely needs a terminal, and the model's system prompt states that division of labour so it does
-> not open shells everywhere.
-
-## Safety boundaries
-
-* **The model can run arbitrary commands.** The `shell_*` tools drive a real `bash` inside a real
-  tmux session, **with your own user privileges** — read files, rewrite config, make network calls,
-  install things, delete things; nothing stops it.
-* **There is no approval prompt.** DSH ships an approval seam (`dsh-user-approval`), but in
-  `danger-full-access` — **the only mode this plugin can work in** — the platform sets its policy to
-  `never` (deterministic reject, no UI). This plugin does **not** integrate that seam, so a command
-  the model runs is never offered to you for allow/reject. See [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md).
-* **The only defence is a heuristic guard** (`guardDangerousCommands`, on by default): ten regexes
-  matching `rm -rf /`, `mkfs`, `dd of=/dev/*`, `sudo` and friends. **Trivially bypassed** through
-  concatenation, variables or script files; it also **false-positives** on innocent text. It is a
-  speed bump, **not a protection**.
-* **The HTTP endpoints are unauthenticated**, and the panel talks over exactly that channel.
-* The `无审批` tag on the panel is **a truthful notice, not a switch**.
-
-Use it on your own dev box and accept that the model may run anything there. Do **not** use it on
-machines holding irreplaceable data, in production, or anywhere prompt injection is plausible —
-or run it inside a container/VM to bound the blast radius.
+Registers the dependency and bundle into the profile → installs via pnpm/npm → checks tmux →
+tells you to restart `dsh web`. `--dry-run` previews; `doctor` checks tmux / install state / data
+dir; `uninstall` removes. npm releases are published by GitHub Actions on `v*` tags (CLI ships
+from 0.2.2).
 
 ## What it is
 
-A private tmux server (`-L dsh-agent`) holds several named sessions; the host half registers `shell_*`
-tools and exposes same-origin HTTP; the client half mounts a floating panel into the `shell.overlay`
-slot. The three are decoupled, so **shells do not belong to any conversation** — new chats, session
-switches, hot reloads and quick restarts keep them alive, and the panel and the model drive the same
-shells.
+- Persistent shells on a private tmux server — survive closing the page, switching chats,
+  hot reload and DSH restarts (watchdog claims/orphans them).
+- **10 model tools**: `shell_open / shell_run / shell_send / shell_read / shell_wait /
+  shell_check / shell_manage / shell_state / shell_audit / shell_consent`, addressed by **stable
+  id** (the user-facing name is a renameable label).
+- The panel is a real terminal: sudo password prompts, full-screen vim, REPLs, completion.
+- **Audit: one hash chain for everything** — `tool-call` / `input` / `open` / `close` / `rename` /
+  `consent` / `panel-lock` / `env-degraded` / `capture` all in `audit-YYYY-MM-DD.jsonl`, each
+  record sealed the moment it is written (SHA-256); altering any record breaks the chain loudly.
 
-Unlike the built-in line-oriented command tool (each call runs in a fresh non-interactive process),
-this plugin keeps a real interactive TTY — so `sudo` password prompts, `ssh`, `vim`, `python` REPLs
-and `Ctrl-C` behave the way they do in a terminal you are sitting at.
+## Safety boundaries (summarised)
 
-## Requirements
+- The one-time consent gate prevents slips, not malicious agents — **native bash can do anything
+  the plugin can** (it can even edit the consent file); anything enforced only inside this plugin
+  is politeness, not a boundary.
+- Human-in-the-loop: unlocking the panel pauses the AI's modifications to that shell (send,
+  rename, resize, close); read-only tools keep working.
+- Capability degradation is stated in plain words (no systemd → sessions die with `dsh` restart;
+  no `/proc` → rough busy detection) — see `shell_state`, panel ⓘ, `/diagnose`.
+- **Linux only** (incl. WSL2); Windows via WSL2, macOS unsupported.
+- Full model: [docs/SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md).
 
-> ### 🐧 Platform: Linux only (including WSL2 / containers)
->
-> **This plugin supports Linux only**; macOS and native Windows are not supported — not because
-> porting is pending, but because the core mechanisms are Linux-specific: `tmux` (only Unix),
-> the nested-tmux foreground check reads the `/proc/<pid>` process tree, the watchdog uses
-> `systemd-run --user --scope`, and the optional audit lock uses `chattr +a`. macOS has `tmux`
-> but lacks the other three (untested, unsupported); on Windows run DSH inside **WSL2**, which is
-> Linux and works fully.
+## When it's worth it
 
-> ### ⚙️ DSH version compatibility (breaking update)
->
-> This plugin (**0.2.0**) targets **DSH 0.1.5 (developer preview)** and is verified on it
-> (`0.1.5-rc.1`). DSH 0.1.5 is a **breaking release** (documented, dev-preview semantics):
-> the `subprocess` service now mounts **late**, after this plugin's `apply()`. Pre-0.1.5
-> plugin code that did a one-shot `ctx.get('subprocess')` in `apply()` gets `undefined`
-> and silently exits early — tools, HTTP routes and the panel all vanish with no error
-> ("plugin disappeared after upgrade" is usually this). Since 0.1.6, `subprocess` is a
-> declared hard dependency (`inject: ['tools', 'subprocess']`).
->
-> **Supported version:** `DSH 0.1.5.x` (dev preview; `0.1.5-rc.1` tested). Older (≤0.1.4)
-> is not verified against this release.
-
-| Item | Version / note |
+| Case | Why |
 |---|---|
-| DSH | **0.1.5.x** (dev preview; `0.1.5-rc.1` verified) |
-| Peers | `@deepseek-ai/cordis` ^4.0.2, `dsh-tools` ^0.1.2-rc.1, `schemastery` ^3.18.0, `react` ^18.2.0 |
-| Node / tmux / OS | ≥ 20 / 3.x / Linux or macOS (WSL works) |
-| Session sandbox | **`danger-full-access` is required** — restricted modes cannot share the tmux server across calls |
-| Browser | no extra deps: hand-written JS + inline SVG, no build step |
+| Interactive tools: `sudo` / `ssh` / `vim` / `gdb` / REPLs | real TTY — password prompts, full-screen TUIs, Ctrl-C |
+| Long tasks with process-startup overhead | shells persist: paths, history, env are kept |
+| "Who made this shell do what, when?" | per-event chain, tamper-evident |
 
-> Peer gotcha: on npm, `@deepseek-ai/dsh-tools`'s `latest` still points at a very old `0.0.1-rc.1`;
-> check `dist-tags`, not `npm view … version`.
+## Quick start
 
-## Install
+1. After install + restart, a pill **`>_ N 🔒`** appears bottom-right.
+2. Click it → **＋** to add a shell, or `shell_open` one.
+3. Panel: unlock, then type (input goes straight to the terminal); AI: `shell_run` to send.
+4. The first tool use asks once; after that it just works.
 
-```sh
-dsh plugin --profile web add dsh-agent-shell    # or file:/path/to/dsh-agent-shell
-```
+## Audit: hash chain + optional lock
 
-`dsh plugin add` reads this package's `cordis.patch.yml` and writes the bundle patch into
-the profile composition for you. Restart `dsh web` once.
-
-> ⚠️ Do **not** also insert a patch row by hand: the bundled patch already inserts `id: agent-shell`,
-> and the id may only appear once — a duplicate makes `dsh web` fail at startup with
-> `duplicate loader entry id: agent-shell`.
+- Default `~/.dsh/agent-shell/audit-YYYY-MM-DD.jsonl` (per-day, auto-pruned); `output/` holds raw
+  terminal recordings whose paths are recorded in the chain (`open` records carry `captureFile`).
+- **No backwards compatibility since 0.2.2**: every record must carry a hash, or the chain is
+  reported broken — clear old logs (`rm ~/.dsh/agent-shell/audit-*.jsonl`) and restart after
+  upgrading.
+- Immutable upgrade: `./install-deps.sh --audit-lock` (`chattr +a`, one-time root; after locking,
+  no auto-prune — archive manually).
 
 ## Recent changes (0.2.2)
 
-* **AI batch send (tool layer)**: `shell_send` / `shell_run` accept comma lists or `*` for
-  `session` (e.g. `"dsh-a,dsh-b"` / `"*"`) — one command, many shells, executed in list order.
-  (The WebUI input is for a human operating one terminal; it does not do batch.)
-* **Mutex upgraded to "every modification"**: while a shell is unlocked, AI sending,
-  rename, resize and close (incl. reap) are all refused; read-only tools and `/list` are unaffected.
-* **Mutex visible across panels**: `/list` now carries `userBusy` per session and `shell_state`
-  marks a shell being operated by a human — list once and you know, instead of hitting a refusal.
-* **`shell_wait` incremental `match:`**: `match:<regex>` only matches output that appears *after*
-  the wait starts (stale screen text can no longer trigger a false success); 30 s default timeout,
-  overridable with `timeout`.
-* **Consent directory sorted by recent activity**: `/actors` sorts by last-active (`updatedAt`, then
-  `createdAt`), not creation time; each entry shows relative time ("just now / N min ago / … days ago").
-* **Quiet "done / new output" hints (option A)**: the status dot flashes for ~3 s when a command
-  finishes, and a `+N lines` badge lights up when new output arrives — visual only, no OS
-  notifications, no sound.
-* **UI**: the shell trigger keeps a two-line layout even with no shells (no container jumping), and
-  the dropdown now aligns with the trigger button's left edge.
-* **Linux only** (incl. WSL2/containers): see the platform note under Requirements.
-* **More settings** (DSH Settings → Plugins → dsh-agent-shell): `shellArgs`, `sessionEnv`,
-  `watchdogStrategy` / `watchdogGraceMs` / `watchdogRenewMs`, `panelPollMs` (panel poll cadence,
-  pushed to the browser via `/list`), `auditLockReminder`, plus the existing shell/size/history/
-  consent/audit keys. Each card marks whether a change applies immediately or needs a restart.
-* **Audit integrity fixes found by a real long-chain test**: `shell_run` used to be a third input
-  path that recorded nothing (commands like `find`/`cat`/`top` never appeared in the audit) — now
-  it records success and refusals; and concurrent chain writes could both start from the same old
-  digest (two `prevHash` = genesis → broken chain) — appends are now serialized with a regression
-  test.
+- One-command install (this file); `doctor` / `uninstall`.
+- More settings: `sessionEnv` / `shellArgs` / `watchdogStrategy`+`GraceMs`+`RenewMs` /
+  `panelPollMs` / `auditLockReminder`.
+- Audit integrity: `shell_run` now recorded (was missing); every tool call emits `tool-call`;
+  concurrent chain appends serialized (was breaking the chain); `shell_audit` `mine/*` selector
+  fixed.
+- Capability probing & degradation with plain-language promises.
+- AI-facing messages point at the fix (unknown id → "use `shell_state` to list ids").
+- Full history: [docs/CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md).
 
-## Recent changes (0.2.1)
-
-* **Identity = stable id.** The tmux session name is a generated id that never changes; the
-  display name is a separable `label` (`@dsh-label` session option) you can rename freely. All
-  addressing (send/read/run/kill/audit/ownership) keys on the id, so renaming can never orphan a
-  shell. Legacy tool names (`shell_history/list/resize/close/rename/diagnose`) are gone.
-* **Tool surface (10 atomic tools)**: the `shell_*` set above, with a unified `session` selector
-  (single id / comma list / `mine` / `*`).
-* **Real-machine fixes**: nested-tmux foreground race fixed via `/proc` process-tree detection;
-  dev-sync/release:check now machine-check that every imported module ships (postmortem of a
-  `.mjs` copy gap that crash-looped `dsh web`); zero-dependency `lib/pure.mjs` extraction with a
-  dedicated pure test suite.
-* **Panel UI refined**: dropdown rows show name (label) + creator + stable id per shell; the
-  header trigger shows the same two-line identity; collapsed pill prefers the label; the info and
-  consent popovers were redrawn in DSH's design language; the three popovers (picker/info/consent)
-  are mutually exclusive. Verified with two shells doing 10 nested `ssh → Windows host → wsl → Kali`
-  round-trips each (20 live ssh processes), left alive on request.
-
-### Audit integrity + panel consolidation (0.2.1)
-
-* **Tamper-evident audit**: every audit record carries `prevHash`+`hash` (SHA-256 over a
-  key-sorted canonical form, pure JS) — deleting a line, flipping a byte or reordering breaks the
-  chain and is reported in `shell_audit` and the panel. Optional one-time `chattr +a` on the audit
-  directory upgrades "detectable" to "immutable" (`./install-deps.sh --audit-lock`).
-  **Every record is sealed as it is written** (one hash per record, not batched), files are
-  **per-day** (`audit-YYYY-MM-DD.jsonl`), and since 0.2.2 there is **no backwards compatibility**:
-  a record without a hash is reported as a broken chain, so clear old logs when upgrading
-  (`rm ~/.dsh/agent-shell/audit-*.jsonl`, then restart). **All three input paths are recorded** —
-  `shell_send`, `shell_run` and the panel's `/keys` — including attempts that were refused.
-* **Injection fix**: session/key names interpolated into control-mode commands are whitelisted
-  (`^[A-Za-z0-9_-]+$`) and rejected otherwise, closing the "run arbitrary tmux commands via the
-  `session` argument" path.
-* **Security config is not hot-reloadable**: `requireConsent` / `auditDir` / `guardDangerousCommands`
-  changes keep the old value and require a restart (plus an audit record). Everything else — new
-  conversations, granting, revoking — stays immediate.
-* **Panel**: the info drawer is now four collapsible cards (Session / Security / System / About);
-  the consent popover can grant **one specific conversation** (search the live conversation
-  directory via `GET /actors`, pick scope × TTL); clicking anywhere inside the panel but outside a
-  popover closes all popovers, while clicking outside the panel does not.
-* **Post-install fixes**: opening the panel no longer crashes on a fresh profile (empty
-  `localStorage` → `rect` is null; width is now read from the anchor-derived `panelRect` instead
-  of `rect.w`); the per-conversation grant directory actually loads now (there was state and UI
-  for it but **no fetch effect** — the menu sat on "loading…" forever), refreshes after every
-  grant/revoke, and falls back to a manual conversation-id entry (previously promised in the copy
-  but never implemented) when the host has no session directory.
-* **Human-in-the-loop mutual exclusion**: unlocking the panel input means a human is operating that
-  terminal, so the plugin pauses **every modification** the AI could make to that shell
-  (`shell_send`; the sending part of `shell_run`; and rename / resize / close) until you re-lock —
-  no more mixed human/AI input (you half-type a command and the AI presses Enter on top of it), and
-  no "human is inside it, AI closes the terminal". Only the shell currently shown in the panel is
-  affected; other shells keep working. Switching away auto-locks the previous shell and the new one
-  starts locked; there is no timeout or auto-release (only a manual lock ends it). Read-only tools
-  (`shell_read`/`shell_state`/`shell_audit`) are unaffected. This is **not a security boundary**
-  — it only stops two parties touching the same terminal at once; authorization still governs
-  what the AI may execute. Human actions are recorded truthfully: unlock/lock each produce an
-  audit record (`event:'panel-lock'`), and panel input was already audited via `/keys`
-  (`event:'input', source:'panel'`) — nothing more is logged.
-* **Data directory**: audit logs and output recordings live under
-  `${DSH_HOME:-~/.dsh}/agent-shell/` (`audit-YYYY-MM-DD.jsonl` per day for the hash-chained log,
-  `output/` for per-session terminal recordings when enabled). Move it via the `auditDir` setting
-  (absolute path; requires a `dsh web` restart).
-
-## Panel & tools
-
-Panel: a lock (input is locked by default and re-locks on focus loss), a true no-buffer input model
-(every keystroke goes straight to the shell; CJK IMEs are supported), drag/8-handle resize with
-persistent geometry, a picker for switching many shells, `⤒` to push any residual text, and history
-view (default 200 lines, "more" doubles up to 5000).
-
-| Tool | Parameters (★ = required) | Purpose |
-|---|---|---|
-| `shell_open` | `name?` `cols?` `rows?` `cwd?` | create a shell, return its first screen (`cwd` that doesn't exist errors out instead of silently landing elsewhere) |
-| `shell_run` | ★`session` `command` | send a command, wait until it settles, return only the new output |
-| `shell_send` | ★`session` `text?` `preKeys?` `keys?` `confirm?` `settleMs?` | type like a human: `preKeys` → `text` → `keys` |
-| `shell_read` | ★`session` `lines?` `mode?` | tail / screen / history / since-incremental |
-| `shell_wait` | ★`session` `until?` `timeout?` | wait until idle / a command / a regex match |
-| `shell_check` | ★`session` `command` | preview the guard verdict without sending |
-| `shell_manage` | ★`session` `action` | rename (label only) / resize / close / reap |
-| `shell_state` | `session?` | one-glance state: id, label, fg, size, buffer, owner; plus server/watchdog/tmux/approval/consent lines |
-| `shell_audit` | — | read the audit trail (inputs, guard verdicts, owner, actor) |
-| `shell_consent` | ★`action` | gate status / grant / revoke by conversation |
-
-Every tool addresses shells by their **stable id** (`session`); `name` on `shell_open` is just a
-display label that can be renamed without affecting addressing.
-
-Field names differ on purpose: only `shell_open` takes `name`; every other tool takes **`session`**
-(required in the schema). HTTP request bodies use `name`.
-
-```jsonc
-shell_send { "session": "dsh-edit", "preKeys": ["i"], "text": "print('hi')", "keys": ["Escape"] }
-```
-
-## HTTP endpoints
-
-Same-origin, `127.0.0.1`, **unauthenticated**:
-`GET /plugins/shell/{list, screen, audit, actors, consent, settings, diagnose, debugctl}`,
-`POST /plugins/shell/{keys, new, kill, resize, rename, busy}`; `/consent` and `/settings` also
-accept writes (POST), and `/busy` carries the human-in-the-loop marker (panel unlock/lock → write
-tools paused). All write requests must be JSON (`content-type: application/json`), enforced by
-the browser-side fence.
-
-## Known limits
-
-* **No approval gate** — the model's commands are never offered for allow/reject (see above).
-* **The guard is a heuristic speed bump, not a sandbox** — false positives and trivially bypassable.
-* **`danger-full-access` required**; restricted modes fail with `error connecting to /tmp/tmux-1000/...`.
-* Host-half code changes need a `dsh web` restart; client-half changes need a page refresh.
-* Text rendering, not terminal emulation (`capture-pane -p` drops colour/attributes).
-* Only shows shells this plugin created (it never touches your own `tmux`).
-* If the host is down for more than ~6 seconds, the orphan watchdog collects all shells.
-
-## Versions and releases
-
-* **The public history keeps version-level nodes only**: each release is **one commit** plus a
-  `v<version>` tag — intermediate steps, their granularity and commit messages are not part of it.
-* **Releases are decided by the maintainer**: pushing a `v<version>` tag is the only release trigger.
-  CI (GitHub Actions) publishes to npm via npm's Trusted Publisher (OIDC) and creates the matching
-  GitHub Release, with a provenance attestation (`npm audit signatures` can verify it).
-* **The README keeps only the latest update**; the full history lives in the Chinese docs
-  ([docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md)) and
-  [CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md).
-* **Only necessary files are published**: the npm package contains just what running and installing
-  needs (`lib/`, `cordis.patch.yml`, `install-deps.sh`, both READMEs, `LICENSE`).
-
-## More detail
+## Docs
 
 | File | Contents |
 |---|---|
-| [README.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md) | 中文首页（本文档的中文主版）；含 `更新与修复记录`（每次修了什么、根因、怎么验证） |
-| [docs/使用细节.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/使用细节.md) | 配置项全表、面板/输入法细节、工具与 HTTP 参数（中文） |
-| [docs/设计与实现.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/设计与实现.md) | 解耦设计、生命周期与孤儿治理、踩坑注记、测试与发布（中文） |
-| [SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md) | full security model: why there is no approval, unauthenticated HTTP, guard boundaries |
-| [PUBLISHING.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/PUBLISHING.md) | release how-to (npm + GitHub, provenance, rollback; 中文) |
-| [CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md) | per-version changes |
+| [docs/使用细节.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/使用细节.md) | usage, config, HTTP API, internals |
+| [docs/SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md) | security model, audit boundary, limits |
+| [docs/CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md) | version history |
+| [docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md) | full change log (root causes + verification) |
+| [docs/PUBLISHING.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/PUBLISHING.md) | release process |
 
 ## License
 
-[MIT](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/LICENSE) © Mrtime-gege
+MIT ([LICENSE](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/LICENSE)).

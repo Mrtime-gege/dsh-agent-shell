@@ -63,6 +63,16 @@
 - **测试**：新增 `test-injection`（5 断言）/ `test-env`（四矩阵 + 降级路径真跑主干）/
   `test-watchdog`（行为断言+参数一致性）；全部并入 `npm test` 链。
 
+### 0.2.2 补充：一条命令安装（新增 CLI）
+
+- 新增 `bin/dsh-agent-shell.mjs`（零依赖 CLI，`package.json` 的 `bin` 与 npm `files` 白名单均已登记）：
+  - `npx -y dsh-agent-shell install [--profile web]`：把依赖与 bundle 登记进 DSH profile →
+    按 pnpm/npm 装依赖 → 检查 tmux → 提示重启 `dsh web`；
+  - `--dry-run` 预览（含"npm 上是否已发布该版本"的前置校验，未发布就给人话而不是让 pnpm 报
+    `No matching version`）；`doctor` 体检（tmux / 各 profile 安装状态 / 数据目录）；
+    `uninstall` 反向移除；`--version` / `--help`。
+- npm 发布仍由推 `v*` tag 的 GitHub Actions 自动完成（0.2.2 起带 CLI）。
+
 ### 0.2.2 补充：更多用户可调参数（设置页）
 
 - **`sessionEnv`**：给新会话注入环境变量（`["EDITOR=vim"]` 形式），解决"会话环境被锁死在
