@@ -47,21 +47,25 @@ check(scopeAllows('whatever', 'read') === false && scopeAllows(undefined, 'full'
 
 /* ── 2. 工具 → 能力映射（改这张表就是改安全边界，所以逐项断言） ─────────── */
 
-const expectRead = ['shell_state', 'shell_read', 'shell_wait', 'shell_check', 'shell_audit']
+// 0.2.3 精简：shell_wait → shell_read(until)，shell_check → shell_run/shell_send(dryrun)，
+// shell_consent → shell_state（所以 shell_state 从 read 升为 none，见下面专项断言）。
+const expectRead = ['shell_read', 'shell_audit']
 const expectFull = ['shell_open', 'shell_run', 'shell_send', 'shell_manage']
 check(expectRead.every((t) => capabilityForTool(t) === 'read'),
   `只读工具：${expectRead.join(', ')}`)
 check(expectFull.every((t) => capabilityForTool(t) === 'full'),
   `需要完全控制的工具：${expectFull.join(', ')}`)
 check(capabilityForTool('shell_manage') === 'full',
-  'shell_manage 需要完全控制（关闭/回收会杀进程，用户拍板不算"只读"）')
+  'shell_manage 需要完全控制（关闭/回收/改闲置时长都会杀进程或改状态，用户拍板不算"只读"）')
+check(capabilityForTool('shell_state') === 'none',
+  'shell_state 任何档位都可查（吸收 shell_consent：被完全禁止时也得能问出"为什么被挡"）')
 check(capabilityForTool('shell_something_new') === 'full',
   '未知工具按"需要完全控制"处理（新增工具忘了登记也不会被放开）')
 
 // 表与断言不许漂移：consent.js 里登记的工具集合必须正好是这些
 {
   const registered = Object.keys(TOOL_CAPABILITY).sort()
-  const expected = [...expectRead, ...expectFull, 'shell_consent'].sort()
+  const expected = [...expectRead, ...expectFull, 'shell_state'].sort()
   check(JSON.stringify(registered) === JSON.stringify(expected),
     `工具映射表与预期一致（${registered.length} 个）：${registered.join(', ')}`)
   // 插件实际注册的工具也不能多出一个没登记的

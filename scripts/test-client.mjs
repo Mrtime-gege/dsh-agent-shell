@@ -91,6 +91,30 @@ if (typeof decideKey !== 'function' || typeof decideComposition !== 'function') 
   process.exit(1)
 }
 
+/* ── 授权浮层（0.2.3 重做）：状态徽标 + 复核句 ─────────────────────────────── */
+
+{
+  const chip = plugin?.__consentStatusChip
+  const review = plugin?.__consentReviewText
+  check(typeof chip === 'function' && typeof review === 'function',
+    '授权浮层的两个纯函数都暴露出来了（__consentStatusChip / __consentReviewText）')
+  if (typeof chip === 'function' && typeof review === 'function') {
+    const none = chip(null)
+    check(none.tone === 'off' && none.label.includes('未设置'), `未授权时的徽标：${none.label}`)
+    const full = chip({ scope: 'full' })
+    check(full.tone === 'on' && full.label.includes('完全控制') && full.label.includes('永久'),
+      `全局完全控制徽标：${full.label}`)
+    const timed = chip({ scope: 'read', expiresAt: Date.now() + 60000 })
+    check(timed.label.includes('只读') && timed.label.includes('限期'), `限期只读徽标：${timed.label}`)
+    const denied = chip({ scope: 'deny' })
+    check(denied.tone === 'warn', `禁止档用 warn 色：${denied.label}`)
+    check(review('持久化交互式 bash 工具', 'full', '10 分钟') === '将授权「持久化交互式 bash 工具」· 完全控制 · 10 分钟',
+      `复核句把"给谁·什么档位·多久"合成一句：${review('持久化交互式 bash 工具', 'full', '10 分钟')}`)
+    check(review('', 'read', '永久').includes('(未选择)'), '没选对话时复核句明确提示未选择')
+    check(review('x', 'weird', '永久').includes('weird'), '未知档位原样显示（不静默吞掉）')
+  }
+}
+
 /* ── decideKey ─────────────────────────────────────────────────────────────── */
 
 const ev = (over = {}) => ({ key: '', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, isComposing: false, ...over })

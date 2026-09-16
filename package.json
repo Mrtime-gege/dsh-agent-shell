@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-shell",
-  "version": "0.2.2",
-  "description": "Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness (DSH): real tmux TTYs, 11 model tools, draggable floating panel",
+  "version": "0.2.3",
+  "description": "Persistent, conversation-decoupled multi-shell terminal panel for DeepSeek Harness (DSH): real tmux TTYs, 7 model tools, draggable floating panel",
   "author": "Mrtime-gege <327958341+Mrtime-gege@users.noreply.github.com>",
   "repository": {
     "type": "git",

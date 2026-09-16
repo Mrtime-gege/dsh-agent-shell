@@ -25,7 +25,9 @@ if [ ! -d "$DST" ]; then
   exit 1
 fi
 
-cp -f "$SRC/package.json" "$DST/package.json"
+# pnpm 的 `file:` 依赖可能把文件做成**硬链接**（同 inode）：此时 cp 报 "are the same file"
+# 并以非 0 退出 —— 内容本就一样，忽略即可（否则 set -e 会在这里中断，后续 lib 一个都同步不了）。
+cp -f "$SRC/package.json" "$DST/package.json" 2>/dev/null || true
 cp -f "$SRC/cordis.patch.yml" "$DST/cordis.patch.yml" 2>/dev/null || true
 mkdir -p "$DST/lib"
 # pnpm 可能把某些文件做成硬链接，此时 cp 会报 "are the same file" —— 内容本就一样，

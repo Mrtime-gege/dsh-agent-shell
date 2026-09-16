@@ -300,7 +300,8 @@ dsh plugin --profile web add dsh-agent-shell@0.1.0
 > 压缩**不改变工作树内容**：脚本会校验发布提交的树与开发树逐字节相同，不一致就中止且不推送。
 
 **现在只有「推 tag」这一步是必须人工触发的**，其余全自动。日常改动写进 CHANGELOG 的
-`## 未发布` 一节、`docs/更新记录.md`（完整根因）与 README 的「最近更新」；发版时把它变成版本号：
+`## 未发布` 一节、`docs/更新记录.md`（完整根因）与 README 的「最近更新」；发版时把它变成版本号。
+**版本日期一律按北京时间（UTC+8）记**（取日期用 `TZ=Asia/Shanghai date +%F`），不要混用 UTC：
 
 ```sh
 V=0.1.4
@@ -555,6 +556,54 @@ python3 scripts/npm-unpublish-webotp.py --dry-run 0.1.0   # 只读预演
 ```
 
 它**不自动打开浏览器** —— 把链接打给人，人在**自己的物理机**上授权（虚拟机里往往没有通行密钥）。
+
+---
+
+## 10. 生态收录（上架到第三方插件商店）
+
+**DSH 官方没有插件商店**，生态由社区目录/雷达自动抓取；两家的入口几乎都是 **GitHub 仓库的
+`dsh-plugin` topic**。本仓库一度 `topics: []`、description 为空 —— 那等于"装了没人知道"：
+抓取方根本没有发现它的途径（2026-09 实测确认）。package 侧的字段（`name` / `main` / `exports` /
+`dsh.bundle.patch` → `./cordis.patch.yml`）已经满足两家校验，缺的只是**仓库元数据**。
+
+### 10.1 必做：仓库 topic + description（一次性，人工）
+
+GitHub 仓库页 → About 右侧 ⚙️：
+
+* **Topics** 至少加 **`dsh-plugin`**（两家都按它发现），建议再加
+  `deepseek-harness`、`dsh`、`tmux`、`terminal`、`ai-agent`。
+* **Description**（抓取方会当摘要读）建议：
+  `Persistent interactive tmux shells for DeepSeek Harness (DSH) — 7 model tools, floating panel, hash-chained audit, consent gate.`
+
+装了 `gh` 并 `gh auth login` 后也可以一行搞定：
+
+```sh
+gh repo edit Mrtime-gege/dsh-agent-shell \
+  --add-topic dsh-plugin --add-topic deepseek-harness --add-topic dsh --add-topic tmux --add-topic terminal \
+  --description "Persistent interactive tmux shells for DeepSeek Harness (DSH) — 7 model tools, floating panel, hash-chained audit, consent gate."
+```
+
+> ⚠️ 用 SSH key 只能推代码，**改不了 topic/description**（那是仓库 API，需要 token）。
+> 本机没有 `gh` 也没有 token 时，这一步只能人工在网页上点。
+
+### 10.2 两家的抓取与校验规则（照做即可被收录）
+
+| 抓取方 | 发现方式 | 频率 | 校验（关键） | 收录后自查 |
+|---|---|---|---|---|
+| **DSH 1024Store**<br>`deepseek1024.com` + [awesome-deepseek-harness-plugins](https://github.com/imsai-sh/awesome-deepseek-harness-plugins) | 带 `dsh-plugin` topic 的 GitHub 仓；另有 PR 收录流水线 | 定时增量抓取 + 定期全量对账（掉 topic 只在一次成功对账后下架） | **只读**默认分支 Git tree：`package.json`、`dsh.bundle.patch` 字段、且 patch 文件**在同一棵 tree 里**；**绝不装依赖、绝不执行代码** | `curl 'https://api.deepseek1024.com/v1/plugins/search?q=dsh-agent-shell'`（匿名 50 次/天、10 次/分；登录后 500/天、30/分） |
+| **DSH Plugin Radar**<br>[AdamPlatin123/dsh-plugin-radar](https://github.com/AdamPlatin123/dsh-plugin-radar) | GitHub Search：topic ×2 + keyword ×3 | 每 6 小时一轮发现；15 分钟机器可读快照 | 静态：`package.json` 有 `name` + `main`/`exports`/`dsh`；再上 **k8s 运行级实测**（一插件一 pod） | 看其 `PLUGINS-ALL.md` 与兼容矩阵（runtime OK / 待测 / 需适配） |
+
+* **加 topic 之后**：Radar 约 **8 小时**内自动收录；1024Store 等下一轮同步（两者都是自动的，**不需要提 PR**）。
+* **安装排行只认包装 CLI**：`dsh1024 plugin --profile web add <包>`（匿名安装遥测）才计入 1024Store 排行；
+  官方 `dsh plugin` 与本包自带的 `npx -y dsh-agent-shell install` **都不计入**。
+* 两家都明确声明：**收录 ≠ 兼容，静态校验 ≠ 运行可用，运行可用 ≠ 安全审计** —— 我们 README 顶部的
+  风险声明因此不受影响，也不应被"已收录"稀释。
+
+### 10.3 可选：主动提交 PR
+
+想更快/更稳地进目录，可向 awesome 清单提 PR（其 `CONTRIBUTING.md` 提供 `submit-dsh-plugin` skill）。
+**提 PR 是公开动作**（会在公开仓库留痕 + 需要 fork），发布纪律第 6 节那条"公开动作只由维护者决定"
+同样适用：默认走 topic 自动收录，PR 由维护者决定是否发。
 
 ---
 

@@ -2,6 +2,141 @@
 
 本文件记录 `dsh-agent-shell` 的版本变化。
 
+## 0.2.3（2026-09-17）— 闲置自动关闭 + 参数直达 AI + 工具精简 10→7 + AI 精准四件套 + 面板重做 + 审计链加固 + 启动性能
+
+- **工具精简 10 → 7**（用户要求"工具数量有点多"）：
+  - `shell_wait` 并入 `shell_read`：新增 `until` 等待模式（`idle` / `fg:<命令>` / `match:<正则>`，
+    非法 until/timeout 立即 REFUSED 不空等；match 仍只匹配等待开始后**新出现**的输出）。工具面
+    `shell_open / shell_run / shell_send / shell_read / shell_manage / shell_state / shell_audit`。
+  - `shell_check` 并入 `shell_run` / `shell_send`：新增 `dryrun` 参数，只预演护栏判决（allowed /
+    REFUSED）、不发送、不记 input 审计。
+  - `shell_consent` 并入 `shell_state`：授权状态/档位（含 scope、过期标记）一并汇报；`shell_state`
+    能力从 read 升为 **none**（被完全禁止的对话也能问出"为什么被挡"——沿用原 shell_consent 的定位）。
+  - `lib/consent.js` 的 TOOL_CAPABILITY 表与测试同步；unknown 工具仍按最严格 full 处理。
+- **闲置自动关闭（用户拍板的规格：设置开关 + 会话级时长 + 统一分钟单位 + 默认 60 + 创建时定值可改）**：
+  - 新设置 `idleClose`（默认 `true`）+ `idleCloseMinutes`（默认 60，范围 1–1440，热更生效）；两个都是
+    新 schema 字段，设置卡片自动出现。
+  - `shell_open idleMinutes` 创建时定死（0 = 永不自动关闭）；`shell_manage action=idle minutes=N` 随时改。
+  - 扫描器 30s 一趟 + 启动 8s 首趟；判定抽成 pure 函数 `idleClosable`（缺 lastUsedAt 一律不关、skip 集豁免、
+    会话级时长覆盖默认）；关闭走统一 close 路径并记 `event:close reason:idle-timeout` 审计。
+  - **重启收养不误杀**：`dsh` 重启后把存活会话的 `lastUsedAt` 拨到现在，扫描器第一趟不会把"刚活过重启"
+    的会话当长期闲置收掉。**实机验证补丁**：ready 时 tmux 若尚未就绪（alive 列表为空、重拨被 catch
+    吞掉）会在第一趟扫描把存活会话再拨一次（`state.adoptionPending` 一趟制）—— 重启时服务端
+    短暂不可见也不会让"干净重启后本该存活"的会话在重启后几分钟内被当闲置收掉。
+  - 定时器 `unref`（不吊住短命进程）；热重载/卸载时清理。
+- **结构化命令结果（A 流）**：`shell_run` 默认给非交互命令包一层安全取码
+  （`pure.shouldWrapExit` 决策 + `wrapExitCommand` + `parseExitFromTail`，全部可单测）：
+  - 多行 / heredoc / 后台（`&` 结尾）/ 交互式白名单（vim/ssh/sudo/python/node/exit/logout 等）**自动跳过包装**；
+  - 护栏与审计仍按**原始命令**判定与记账（包装只是取码手段，不进"谁干了什么"记录）；
+  - 返回 `✅/❌ exit N + 耗时 + 尾部`，`structured:false` 原样发送；
+  - 失败结果进 `state.lastRuns`，`shell_state` 每会话显示 `last=✅/❌ Ns(exit N)`（5 分钟内，B 流）。
+- **会话快照/复活（C 流）**：
+  - `<auditDir>/snapshots.json` 存 cwd/label/尺寸/闲置时长；写入点：open / rename / resize / idle /
+    snapshot 手动 / close / reap / idle-close（关闭前用 `#{pane_current_path}` 取**实时** cwd）；
+  - `shell_open { from: <id> }` 复活：显式参数 > 快照 > 对话 cwd > 配置默认；输出标注 `复原自快照`。
+- **审计导出/离线验证（E 流）**：`shell_audit { export: true }` 返回原始 JSONL（含 prevHash/hash；
+  按天表头、days 扩大范围、单次 ≤8000 行）；CLI 新增 `verify-audit [目录] [--json]`（随包发布，
+  复用 lib/audit.js 的 readSealedChain+verifyChain，退出码 0=完整/1=断链/2=用法错误）。
+- **历史全文搜索（F 流）**：`shell_read { search: <正则> }` 用 `capture-pane -S -historyLimit` 取全量
+  滚动缓冲再行匹配，返回 `L<行号> <行>`；非法正则立即 REFUSED。
+- **敏感信息脱敏（G 流，设置开关）**：新设置 `redactSecrets`（默认开，立即生效）；
+  `pure.redactSecrets` 形状匹配（token=/password=/API_KEY=/Bearer/BEGIN PRIVATE KEY/URL 内嵌口令/
+  gh_/glpat-/xox/AKIA 等），应用于审计 input 文本（auditTextFor 包装层）、工具读屏出口（showText →
+  readTail/搜索结果）、面板 /screen 响应；output/ 留痕原始字节**不**脱敏（以此为界）。
+- **面板下拉列表：表头与表内一致（用户反馈）**：触发器（"表头"）与下拉行原本各用一套类与字段
+  （触发器 `dshsh-name-*`、行 `dshsh-row-*`，且行多出前台/字节）→ 抽成共用渲染 `sessionCell()`
+  与共用类，两处字段完全一致：`名字 + 创建者` / `稳定 id · 尺寸 · 前台 · 字节`；CSS 选择器同步
+  覆盖 `.dshsh-name .dshsh-cell`。
+- **创建者显示会话名（用户反馈）**：面板与 `shell_state` 不再显示 `session-<uuid>`。宿主新增
+  `ownerLabel(actor, source)`：复用既有 `titleCache`/`captureTitle`（`sessionQuery.readTitle`，
+  60s TTL）拿 DSH 左侧列表的**会话标题**，拿不到退回短 id（`…后 12 位`），面板开的标「面板」；
+  `/list` 每行新增 `ownerName` 字段供面板直接使用。
+- **授权浮层重做（用户反馈，参照成熟授权设计）**：
+  - 顶部标题条 + **当前全局档位徽标**（`consentStatusChip`：未设置/完全控制/只读/限期/禁止 warn 色）；
+  - **双页签**：「给单个对话授权」（默认，选人 → 授权）与「所有对话（默认）」（全局档位），
+    不再把两套控件堆在一屏；
+  - 档位由分段按钮改为**后果卡片**（`CONSENT_SCOPE_HINTS`：完全控制/只读/完全禁止各一句
+    "同意之后会发生什么"）；
+  - 选中对话后给**复核句** `consentReviewText`（`将授权「标题」· 档位 · 时长`），再点主按钮；
+    已授权的对话就地显示「撤销此对话」；
+  - 手工填 id 的降级路径保留；已授权会话列表（标题 + 档位 + 剩余时间 + 逐条撤销）保留。
+  - 客户端纯函数新增 2 个并加断言（test-client 390 → **398**）；面板"打开全部内部状态再渲染"
+    的那一遍已经覆盖到新浮层（渲染不抛错）。
+- **AI 精准四件套（用户点选："1+2+4+5"）**：
+  - **① 条件等待** `shell_run { waitFor, waitTimeout }`：`match:<正则>`（只匹配等待开始后**新出现**
+    的输出，复用与 shell_read until 同一套增量预览）、`file:<路径>`（主机侧 existsSync）、
+    `port:<1-65535>`（`node:net` 回环连接，700ms 超时）。解析与校验抽成 pure 函数 `parseWaitFor`
+    （非法形式立即 REFUSED，不空等）；设了 waitFor 就**不等空闲、不取退出码**（命令通常是长驻服务）。
+  - **② 失败摘要**：pure `summarizeFailure` 挑像错误的行（error/failed/panic/denied/No such file/
+    Traceback/✗…），没有关键词则回退到最后一条**有内容**的行；提示符（框线 `┌└╭╰`、`㉿`、
+    裸 `$`/`#`）一律过滤 —— 实测发现不认框线提示符时会把提示符当摘要。摘要进返回头与 `lastRun.err`。
+  - **④ 重跑**：`shell_run { retry: 'last-failed' | 'last' }`，命令原文取自 `state.lastRuns`
+    （改为存完整命令，上限 4000 字符）；最近一条不是失败时明确说明而不是默默重跑。
+  - **⑤ 会话自检**：`shell_manage action=doctor`（pure `doctorAdvice`）：报告 fg/无活动秒数/缓冲
+    占用%/idle/留痕状态，并对"前台非 shell 且久无活动=可能卡住、缓冲≥90%、留痕已停、即将被闲置
+    关闭、人在操作"给出可执行建议（读 tmux `#{session_activity}`）。
+  - 测试：pure 116 → **138**（waitFor 解析 / 摘要含提示符过滤 / 自检建议）；edge 新增 7.94d
+    （失败摘要、retry 正反例、waitFor file-match-非法-超时、doctor）；smoke 新增 1/4/5 接线。
+- **`until`/`waitFor match:` 语义钉死（0.2.3 真机长任务验证发现并修复）**：原实现是"底部逐行
+  比对"，一旦最后一行变化（任何流式输出、进度行刷新）差异段就退化成整屏 → **等待词出现在自己发的
+  命令回显里会 0.0s 假成功**，且短命令输出会被错误归为旧文本。修复分三块，全部可单测：
+  - `pure.diffSince` 重写增量：**整行对齐**找旧帧最长可复现尾部（最后一次出现，兼容重复内容），
+    该块之后才是"新"；底部空行填充不参与；旧帧完全滚出/最后一行被重绘覆盖时保守视为全屏皆新。
+  - `shell_read until=match`：以"开始等待"那一刻固化为基线（屏上已有旧词不命中 —— edge 原有
+    `OLD_MARK/FRESH_MARK` 增量用例继续通过）。
+  - `shell_run waitFor match`：基线 = **发送前**（不是 idle 循环之后 —— 那会吞掉短命令的全部
+    输出），另加 `pure.stripCommandEcho` 按"去空白拼接、前缀渐进"剥掉命令回显（兼容折行劈词），
+    回显里的等待词不算输出；命令真正的输出（哪怕瞬时）照常命中。
+  - 测试：pure 138 → **160**（diffSince 11 项 + stripCommandEcho 9 项）；smoke 新增 1b（回显含
+    等待词、输出没有 → 必须超时）；edge `waitFor file/match`、`until` 增量用例全绿。
+- **实机长任务验证记录（0.2.3）**：150 步 × 1s 的流式长命令在 120×32 真窗格全程跑完，
+  `until=match` 只在真实完成点（≈80s 后）命中；闲置 1 分钟的会话走完整链路（扫描 →
+  `reason=idle-timeout` 关闭 → 快照落盘，实机 76s）；当日 73 条审计全链封链 + `verify-audit` CLI
+  退出码 0；搜索/结构化退出码/owner 标题显示/面板字段实机复核。据此写进 README 的**已知行为**：
+  ① 以 `bash/sh/python…` 开头的命令不包退出码（交互白名单保守起见），等长任务完成请用
+  `waitFor` / `until`，不要依赖 `shell_run` 的 idle 判定（shell 循环/`bash -c` 瞬时采样会判成空闲
+  提前返回）；② `shell_run` 的 `lines` 语义 = "可见屏 + N 行滚动回看"，非"只回 N 行"；③ `waitFor
+  match` 基线在发送前，命令回显里的等待词不算输出（不再 0.0s 假成功）。
+- **docs(PUBLISHING)：新增「生态收录」章节（第 10 节）**：说明 DSH 无官方商店、两家社区抓取方
+  （DSH 1024Store / DSH Plugin Radar）的发现方式·频率·校验语义，以及上架必做项（仓库 `dsh-plugin`
+  topic + description，SSH key 改不了、需人工或 token）、收录后自查（公开 API / PLUGINS-ALL.md）、
+  安装排行只认 `dsh1024` 包装 CLI 等口径。
+- **参数直达 AI（用户要求"常用基本参数通过查询工具直接返回"）**：- **参数直达 AI（用户要求"常用基本参数通过查询工具直接返回"）**：
+  - `shell_state` 输出末尾附 `◈ 常用参数(JSON)` 块：`maxSessions / sessionsUsed / idleClose /
+    idleCloseMinutes / shell / cols / rows / historyLimit / guard / extendedKeys / requireConsent /
+    watchdogPid / tmux / auditDir`。每会话行附带 `idle=Nm`（或 `idle=0(off)`）。
+- **"mine" 幽灵归属修复（1910f38，0.2.3 一并发布）**：`selectIds('mine')` 按 tmux 实际存活过滤
+  `sessions.json` 里的持久化归属——会话已死（外部 kill/看门狗收割/旧版本遗留）不再让批量发送在
+  第一个幽灵上整体报 `can't find pane`。冒烟新增"tmux 直接 kill 会话后 mine 仍送达"回归。
+- **env 探测修复（env.mjs:76）**：`detectEnv` 返回 `hasTmux: okText`（直连原始结果）、丢掉已算好的
+  preset 感知值 → 受限 harness（直连 execFile 失败）下看门狗被误关。改回复用 `hasTmux`；test-env 补
+  预设路径回归（预设 ok+直连失败 → 看门狗照常）。另加 `io.tmux='skip'` 哨兵：插件启动时直连 tmux
+  探测结果稍后会被 driver 探测覆盖，不再浪费一次 exec。
+- **审计链加固（修复真机第 467 条断链）**：
+  - 根因：`auditChain.head` 每实例初始为 genesis、要等 `state.ready` 异步从磁盘读回；而 `recordAudit`
+    是 fire-and-forget——配置热重载/进程重启后的第一个清晨请求（实测：面板 consent）会封在创世前驱上，
+    整条链从这里断掉（prev-mismatch，`hint=cold-start-genesis`，非篡改）。
+  - 修复：`appendAudit` 增加**链头就绪闸门**（`await chain.ready` 后再封链）；闸门在 apply 同步创建、
+    state.ready 审计段 try/finally 释放（audit 关闭或读盘失败也释放，绝不卡住审计写入）。
+  - 校验器对 `prevHash=genesis 且前一条存在` 给出 `cold-start-genesis` 诊断；`shell_audit`/启动日志
+    显示"冷启动/热重载竞态，非篡改迹象"，不再笼统报"可能被篡改"。
+  - `scripts/repair-chain.mjs`（**源码仓库内**，npm 包不含 scripts/）：仅修 cold-start-genesis 型历史
+    断点的可选修复器（默认 dry-run；`--apply` 先备份 `*.before-repair-*` → 从断点前一条 hash 重接 →
+    追记链上可见的 `chain-repair` 记录 → 复验；其它断点一律拒绝）。
+- **启动性能（bench 实测 apply→ready 135/149 → 57/57 ms，启动期 spawn 14 → 3 次）**：
+  - 审计启动不再重复全量扫描（去掉 fire-and-forget 的第二遍 readSealedChain）与重复 prune；
+  - `$HOME` 不再起 `sh -c echo $HOME` 子进程（`os.homedir()`）；
+  - env 直连 tmux 探测跳过（`tmux:'skip'`）；
+  - **看门狗延迟布防**：无存活会话时启动期不 spawn Node 守护进程，首个 `shell_open`/`shell_state`
+    由 `ensureWatchdog` 兜底（新增 `ensureLeaseTimer` 两入口共用，延迟布防不漏续租）；
+  - 新增 `startup ready in Xms` 启动计时日志与 `scripts/bench-startup.mjs` 性能回归基准。
+- **已知限制更新**：整机/虚拟机重启（WSL2 VM 等）会丢失全部会话——tmux 会话不落盘，属平台层限制；
+  `dsh` 自身重启不受影响（systemd 用户 scope）。README 风险区新增第 7/8 条（闲置自动关闭真的会关、
+  整机重启丢会话）。
+- **测试**：pure 94（新增 idleClosable ×10、审计闸门 ×2、断链诊断 ×2）、consent（能力表新断言）、
+  client 390、env（含 preset 回归）、edge（dryrun/闲置接线/等待模式/授权档位/幽灵/审计）、smoke
+  （工具数 7、闲置/参数块接线）全绿。
+
 ## 0.2.2 — AI 批量发送（工具层）+ 互斥升级「一切修改」+ shell_wait 增量匹配 + 授权菜单按活跃排序
 
 - **AI 批量发送（工具层，明确这是给 AI 的）**：`shell_send` / `shell_run` 的 `session` 接受逗号

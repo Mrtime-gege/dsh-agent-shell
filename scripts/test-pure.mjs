@@ -2,13 +2,17 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  NAME_PREFIX, DANGEROUS, scanDanger, sanitizeName, clamp, parseTmuxVersion,
+  NAME_PREFIX, DANGEROUS, scanDanger, sanitizeName, clamp, parseTmuxVersion, idleClosable,
+  shouldWrapExit, wrapExitCommand, parseExitFromTail, diffSince, stripCommandEcho, redactSecrets,
+  parseWaitFor, summarizeFailure, doctorAdvice,
 } from '../lib/pure.mjs'
 // tmux.js 零 DSH 依赖（只引 node:fs/promises 与 node:child_process）—— 纯逻辑可离线测
 import { drillForeground, normalizeReply, readDescendantProcs } from '../lib/tmux.js'
 
+let checked = 0
 let failed = 0
 const pass = (ok, label) => {
+  checked += 1
   if (!ok) { failed += 1; console.log('✗', label) }
 }
 
@@ -147,5 +151,230 @@ import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } fro
     'env-degraded 摘要带降级去向')
 }
 
-console.log(failed === 0 ? `pure 纯函数：全部通过（74 项断言）` : `pure 纯函数：${failed} 项失败`)
+
+/* ── idleClosable：闲置自动关闭的纯决策 ───────────────────────────────────── */
+
+{
+  const T0 = 1_000_000
+  const mkSession = (name) => ({ name })
+  const owners = (over = {}) => ({ a: { lastUsedAt: T0, idleMinutes: 60 }, ...over })
+  // 已到期：lastUsedAt 距今 ≥ 时长
+  pass(idleClosable([mkSession('a')], owners(), { now: T0 + 3600_000 }).join(',') === 'a',
+    '闲置超过时长 → 到期候选')
+  // 未到期：还差一点
+  pass(idleClosable([mkSession('a')], owners(), { now: T0 + 3599_000 }).length === 0,
+    '未到时长 → 不闭（差 1 秒也不行）')
+  // 恰好等于时长 → 到期（>= 语义）
+  pass(idleClosable([mkSession('a')], owners(), { now: T0 + 3600_000 }).length === 1,
+    '恰好等于时长 → 到期')
+  // 每会话覆盖：idleMinutes=0 永不关（即便很久没动）
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 0 } }), { now: T0 + 86400_000 }).length === 0,
+    '会话级 idleMinutes=0 → 永不自动关闭')
+  // 每会话覆盖：小的覆盖默认值
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 5 } }), { now: T0 + 6 * 60000 }).length === 1,
+    '会话级短的时长覆盖默认（5 分钟 → 6 分钟已到期）')
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 5 } }), { now: T0 + 4 * 60000 }).length === 0,
+    '会话级短的时长未到期不闭')
+  // 默认值兜底
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0 } }), { now: T0 + 65 * 60000, defaultMinutes: 60 }).length === 1,
+    '无会话级时长 → 用默认 60 分钟')
+  // skip：人在操作的会话不扫
+  pass(idleClosable([mkSession('a')], owners(), { now: T0 + 3600_000, skip: new Set(['a']) }).length === 0,
+    'skip 集合里的会话不扫（面板解锁/手动豁免）')
+  // 防御：缺失归属 / 缺失 lastUsedAt 一律不闭
+  pass(idleClosable([mkSession('ghost')], owners(), { now: T0 + 86400_000 }).length === 0,
+    '无归属条目 → 不闭（宁可少关）')
+  pass(idleClosable([mkSession('a')], owners({ a: { idleMinutes: 60 } }), { now: T0 + 86400_000 }).length === 0,
+    'lastUsedAt 缺失 → 不闭（没有活动记录不敢收）')
+  // 多会话混合：只关到期的
+  const mix = idleClosable([mkSession('old'), mkSession('new'), mkSession('never')], owners({
+    old: { lastUsedAt: T0, idleMinutes: 60 },
+    new: { lastUsedAt: Date.now(), idleMinutes: 60 },
+    never: { lastUsedAt: T0, idleMinutes: 0 },
+  }), { now: T0 + 3600_000 })
+  pass(mix.join(',') === 'old', `多会话只关到期的（${mix.join(',') || '(空)'}）`)
+}
+
+
+/* ── 审计封链的冷启动闸门（0.2.3 修复：热重载/重启窗口期别封在 genesis 上） ─────── */
+
+{
+  const dir2 = mkdtempSync(join(tmpdir(), 'audit-race-'))
+  const paths2 = { dir: dir2, input: (d) => join(dir2, `audit-${d}.jsonl`) }
+  // 磁盘上已有一条正常封链的记录
+  const chain0 = { head: AUDIT_GENESIS, seq: 0, verify: null }
+  await appendAudit(paths2, '2026-01-01', { event: 'first', ts: 1 }, chain0)
+  // 模拟"新实例启动、链头还没读回"：chain.head 仍是创世，但给了 ready 闸门（稍后才 resolve）。
+  // 与生产一致：启动流程**先**把链头读到 chain.head，**再**放行闸门 —— 队列里的早到写入
+  // 等到那一刻才封链，于是接在磁盘链头之后而不是创世。
+  let boot
+  const chainBoot = { head: AUDIT_GENESIS, seq: 0, ready: new Promise((resolve) => { boot = resolve }) }
+  const appending = appendAudit(paths2, '2026-01-01', { event: 'early-arrival', ts: 2 }, chainBoot)
+  // 闸门未放行时，"早到"的记录不应落盘（排队中）
+  await new Promise((r) => setTimeout(r, 60))
+  const linesBeforeRelease = (await import('node:fs')).readFileSync(paths2.input('2026-01-01'), 'utf8').trim().split('\n').length
+  pass(linesBeforeRelease === 1, `闸门未放行时早到记录排队不落盘（${linesBeforeRelease} 行）`)
+  // 链头读回完成：先赋值、再放行
+  chainBoot.head = chain0.head
+  boot()
+  await appending
+  const recs = await readAudit(paths2, '2026-01-01')
+  pass(recs[1].prevHash === chain0.head,
+    `冷启动闸门：早到记录接在磁盘链头之后（prev=${recs[1].prevHash.slice(0, 12)}，非 genesis）—— 修复前会封在创世上断链`)
+  pass(verifyChain(recs).ok === true, '闸门后整链校验通过')
+}
+
+/* ── 断链诊断提示：prevHash=genesis 且前一条存在 → cold-start-genesis ────────── */
+
+{
+  const R1a = sealRecord(AUDIT_GENESIS, { event: 'a', ts: 1 })
+  const R2a = sealRecord(AUDIT_GENESIS, { event: 'b', ts: 2 })   // 模拟冷启动窗口的坏封链
+  const verdict = verifyChain([R1a, R2a])
+  pass(verdict.ok === false && verdict.brokenAt?.reason === 'prev-mismatch' &&
+    verdict.brokenAt?.hint === 'cold-start-genesis',
+    'prev-mismatch 且 prevHash=genesis → 诊断提示 cold-start-genesis（而不是笼统的"被篡改"）')
+  pass(verifyChain([R1a]).ok === true, '单条正常链仍通过')
+}
+
+
+/* ── 结构化命令结果（A）：包装决策 / 退出码解析 ───────────────────────────── */
+
+{
+  pass(shouldWrapExit('ls -la').wrap === true, '普通命令可包装取退出码')
+  pass(shouldWrapExit('cd /tmp && pwd').wrap === true, '含 && 的命令可包装')
+  pass(shouldWrapExit('vim file.txt').wrap === false && shouldWrapExit('vim file.txt').reason.startsWith('interactive'),
+    '交互式程序（vim）不包装')
+  pass(shouldWrapExit('ssh host').wrap === false, 'ssh 不包装（要交互）')
+  pass(shouldWrapExit('sudo apt update').wrap === false, 'sudo 不包装（可能要密码）')
+  pass(shouldWrapExit('exit 3').wrap === false, 'exit 不包装（包装会让 shell 先退出、取不到码）')
+  pass(shouldWrapExit('echo a\necho b').reason === 'multiline', '多行命令不包装')
+  pass(shouldWrapExit('cat <<EOF').reason === 'heredoc', 'heredoc 不包装')
+  pass(shouldWrapExit('sleep 100 &').reason === 'background', '后台化（& 结尾）不包装')
+  pass(shouldWrapExit('   ').wrap === false, '空命令不包装')
+  const wrapped = wrapExitCommand('false')
+  pass(wrapped.startsWith('false ;') && wrapped.includes('__DSH_EXIT__'), `包装串形状正确：${wrapped.slice(0, 40)}…`)
+  pass(parseExitFromTail('out\n__DSH_EXIT__=1\n').exit === 1, '从尾部解析退出码 1')
+  pass(parseExitFromTail('out\n__DSH_EXIT__=0\n__DSH_EXIT__=1\n').exit === 1,
+    '滚动缓冲残留旧标记时取**最后**一条（0.2.3 修复：非全局 exec 会拿到旧标记）')
+  pass(parseExitFromTail('out\n__DSH_EXIT__=0\n').found === true, '解析到 0 也算 found（不能当假值丢掉）')
+  pass(parseExitFromTail('no marker').found === false, '没有标记 → found=false')
+}
+
+/* ── 敏感信息脱敏（G） ───────────────────────────────────────────────────── */
+
+{
+  pass(!redactSecrets('API_KEY=abcd1234efgh').includes('abcd1234efgh'), 'API_KEY=… 被脱敏')
+  pass(!redactSecrets('password: hunter2secret').includes('hunter2secret'), 'password: … 被脱敏')
+  pass(redactSecrets('Authorization: Bearer abcdefghijklmn').includes('[redacted'), 'Bearer 令牌被脱敏')
+  pass(redactSecrets('https://user:s3cr3tpw@example.com/repo').includes('***@') ||
+    redactSecrets('https://user:s3cr3tpw@example.com/repo').includes('[redacted'), 'URL 内嵌口令被脱敏')
+  pass(redactSecrets('ghp_' + 'abcdefghijklmnopqrstuvwxyz012345').includes('[redacted'), 'GitHub 令牌样式被脱敏（字面量拆开构造，避免触发仓库密钥扫描的误报）')
+  pass(redactSecrets('hello world, nothing secret here') === 'hello world, nothing secret here',
+    '普通文本原样返回（不误伤）')
+  pass(redactSecrets('') === '' && redactSecrets(null) === null, '空值/非字符串安全返回')
+}
+
+
+/* ── 条件等待 waitFor（1 流） ────────────────────────────────────────────── */
+
+{
+  const m = parseWaitFor('match:listening on')
+  pass(m.kind === 'match' && m.re instanceof RegExp && m.re.test('listening on :3000'), 'match: 解析成增量正则')
+  const f = parseWaitFor('file:/tmp/ready.flag')
+  pass(f.kind === 'file' && f.value === '/tmp/ready.flag', 'file: 解析出路径')
+  const p = parseWaitFor('port:8080')
+  pass(p.kind === 'port' && p.value === 8080, 'port: 解析出端口号')
+  pass(parseWaitFor('port:0').error !== undefined && parseWaitFor('port:99999').error !== undefined,
+    '端口越界 → 明确报错（不静默接受）')
+  pass(parseWaitFor('match:[').error !== undefined, '非法正则 → 明确报错')
+  pass(parseWaitFor('whatever').error !== undefined, '未知形式 → 明确报错并说明支持哪些')
+  pass(parseWaitFor('').error !== undefined, '空串 → 报错')
+}
+
+/* ── 屏幕增量 diffSince（until/waitFor match、since 模式的新内容判定） ───────── */
+
+{
+  const d = (l, c) => diffSince(l, c)
+  pass(d('', '') === '', '空帧对空帧 → 空')
+  pass(d('old line', 'old line') === '', '完全相同 → 空')
+  pass(d('p\nc1\nc2\ns1', 'p\nc1\nc2\ns1\ns2\ns3') === 's2\ns3', '底部追加：旧帧整体被识别为旧，只有追加行算新')
+  pass(d('└─$ echo [TASK] COMPLETED\n[TASK] step 1', '└─$ echo [TASK] COMPLETED\n[TASK] step 1\n[TASK] step 2') === '[TASK] step 2',
+    '自匹配防护：等待词出现在"自己发的命令回显"里不算新输出')
+  const a = Array.from({ length: 20 }, (_, i) => `line ${i}`)
+  const b = [...a, 'line 20', 'line 21']
+  pass(d(a.join('\n'), b.join('\n')) === 'line 20\nline 21', '流式滚动：旧帧尾部仍是新帧前缀 → 只返回滚出的新行')
+  pass(d('a\nb\n\n\n', 'a\nb\nc\n\n\n') === 'c', '底部空行填充（trim:false 带回）不干扰匹配')
+  const alt = d('x\nbusy-line', 'x\nbusy-line2\ndone')
+  pass(alt === 'busy-line2\ndone', '最后一行被重绘覆盖（进度条/提示符刷新）→ 去掉光标行再对齐，新内容完整保留')
+  pass(d('t\nR\nR', 't\nR\nR\nR\nN') === 'R\nN', '重复内容：旧块之后的全算新（含重复本身之后的真实新增）')
+  pass(d('old content', 'brand\nnew\nscreen') === 'brand\nnew\nscreen', '旧帧完全滚出 → 全屏算新（无旧可依）')
+  pass(d('same\ncontent', 'same\ncontent\nmore') === 'more', '旧帧等长前缀 + 追加 → 只有追加算新')
+  pass(d('P', 'P\necho READY\nREADY\nP') === 'echo READY\nREADY\nP',
+    '旧提示符在顶部、同形新提示符在末尾 → 取第一次出现：命令输出完整保留（末尾提示符是新内容）')
+  const promptRewrite = '┌──(u㉿h)-[~]\n└─$'
+  const afterCmd = '┌──(u㉿h)-[~]\n└─$ sleep 0.4; echo READY-MARK-9\nREADY-MARK-9\n\n┌──(u㉿h)-[~]\n└─$'
+  pass(d(promptRewrite, afterCmd) === '└─$ sleep 0.4; echo READY-MARK-9\nREADY-MARK-9\n\n┌──(u㉿h)-[~]\n└─$',
+    '真机形态：光标行被输入改写、底部新提示符同形 → 回显与输出都在"新内容"里（不被吞）')
+  pass(d('A\nB\nC', 'A\nB\nC2') === 'C2', '只有光标行被改写 → 只有该行算新（旧帧其余部分不重复报）')
+}
+
+/* ── 命令回显剥离 stripCommandEcho（waitFor match 的自匹配防护） ────────────── */
+
+{
+  const s = (fresh, sent) => stripCommandEcho(fresh, sent)
+  pass(s('', 'echo x') === '', '空输入 → 空')
+  pass(s('hello\nworld', 'echo other') === 'hello\nworld', '与命令无关的新输出原样返回')
+  pass(s('sleep 0.4; echo READY\nREADY\n$', 'sleep 0.4; echo READY') === 'READY\n$',
+    '剥掉回显整行，命令真输出保留')
+  pass(s('x=SMK-1; date +%s\n1789\n$', 'x=SMK-1; date +%s') === '1789\n$', '简单命令回显剥离')
+  pass(s('echo [TASK] COMPLETED\n[TASK] step 1\n[TASK] COMPLETED', 'echo [TASK] COMPLETED') === '[TASK] step 1\n[TASK] COMPLETED',
+    '回显含等待词但输出后到 → 剥离后仍等真输出（自匹配防护的核心场景）')
+  pass(s('x=SMK-9; dat\ne +%s\n1789\n$', 'x=SMK-9; date +%s') === '1789\n$',
+    '折行把单词劈开（去空白拼接判定）也能剥干净')
+  pass(s('sleep 1; echo READY\nREADY\n$', 'sleep 1; echo READY') === 'READY\n$',
+    '输出行恰好是命令子串时不被误剥（前缀判据在命令结束时停手）')
+  pass(s('└─$ sleep 0.4; echo READY-MARK-9\nREADY-MARK-9\n└─$', 'sleep 0.4; echo READY-MARK-9') === 'READY-MARK-9\n└─$',
+    '回显行带提示符前缀（└─$ <命令>）也能剥干净')
+  pass(s('anything at all', '') === 'anything at all', '空命令文本 → 原样返回')
+}
+
+/* ── 失败摘要（2 流） ───────────────────────────────────────────────────── */
+
+{
+  const s = summarizeFailure('some line\nmake: *** [build] Error 1\n$')
+  pass(s.includes('Error 1'), `失败摘要挑出错误行：${s}`)
+  const multi = summarizeFailure('Traceback (most recent call last):\n  File "x.py"\nModuleNotFoundError: No module named foo\n$')
+  pass(multi.includes('ModuleNotFoundError'), `多行错误取像错误的那行：${multi}`)
+  pass(summarizeFailure('just output\n$') === 'just output',
+    '没有错误关键词时回退到最后一条有内容的行（失败常常只是一句 "Segmentation fault"）')
+  pass(summarizeFailure('just output\n\n$') === 'just output', '空行与提示符都被过滤掉，不会拿它们当摘要')
+  pass(summarizeFailure('') === '', '空输入 → 空摘要')
+  const long = summarizeFailure('error: ' + 'x'.repeat(500))
+  pass(long.length <= 160, `摘要按上限截断（${long.length} 字符）`)
+  pass(summarizeFailure('$') === '', '只剩提示符 → 空摘要')
+  const boxPrompt = 'echo x\n┌──(user' + '\u3299' + 'host)-[/tmp]\n└─$'   // 主机名用占位（避免仓库密钥/主机名扫描误报）
+  pass(!summarizeFailure(boxPrompt).includes('┌') && !summarizeFailure(boxPrompt).includes('㉿'),
+    `框线/㉿ 提示符不会被当成失败摘要（实得：${JSON.stringify(summarizeFailure(boxPrompt))}）`)
+  const realErr = 'ls: cannot access /nope: No such file or directory\n┌──(user' + '\u3299' + 'host)-[/tmp]\n└─$'
+  pass(summarizeFailure(realErr).includes('No such file'), '有真错误行时优先取错误行（提示符被过滤）')
+}
+
+/* ── 会话自检建议（5 流） ───────────────────────────────────────────────── */
+
+{
+  const stuck = doctorAdvice({ foreground: 'vim', isShell: false, idleSec: 3600 })
+  pass(stuck.length === 1 && stuck[0].includes('可能卡住') && stuck[0].includes('C-c'),
+    `前台非 shell 且久无活动 → 给"怎么办"：${stuck[0].slice(0, 40)}…`)
+  pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 10 }).length === 0, '正常空闲会话 → 无建议')
+  pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 10, bufferPct: 95 })[0].includes('缓冲'),
+    '缓冲接近上限 → 提示调大 historyLimit')
+  pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 10, captureStopped: true })[0].includes('留痕'),
+    '留痕已停 → 如实提示')
+  pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 4000, idleMinutes: 60 })[0].includes('闲置'),
+    '超过闲置时长 → 提示即将被自动关闭')
+  pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 10, userBusy: true })[0].includes('人在操作'),
+    '人在操作 → 说明 AI 写操作会让路')
+}
+
+console.log(failed === 0 ? `pure 纯函数：全部通过（${checked} 项断言）` : `pure 纯函数：${failed}/${checked} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

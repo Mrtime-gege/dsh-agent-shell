@@ -18,6 +18,7 @@
  */
 
 import { existsSync, readFileSync, rmSync, readdirSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -77,6 +78,7 @@ const idOf = async (label, callFn) => {
   const name2 = name
 
   // 同名 label 允许重复；**id 各自唯一**（v2 起没有"重名自动加后缀"——名字只是显示）
+  console.log('PROBE before dup open, live:', JSON.stringify(tmux(['list-sessions', '-F', '#{session_name}']).trim().split('\n').filter(Boolean)))
   const dup = await run('shell_open', { name: 'dupname' })
   const dupFirst = (dup.match(/session (\S+)/) ?? [])[1]
   const dup2 = await run('shell_open', { name: 'dupname' })
@@ -142,13 +144,13 @@ const idOf = async (label, callFn) => {
   try { await run('shell_send', { session: 'dsh-nope-x', text: 'x' }) } catch (error) { missingText = String(error?.message ?? error) }
   check(missingText.includes('no such session') && missingText.includes('shell_state'),
     `不存在会话的报错附「用 shell_state 查现有 id」修复提示（${missingText.slice(0, 70)}）`)
-  // shell_wait 的 until 不合法要立即 REFUSED，而不是空等 30 秒超时
+  // shell_read 的 until 不合法要立即 REFUSED，而不是空等 30 秒超时（0.2.3：吸收原 shell_wait）
   const openedW = await run('shell_open', { name: 'wait-bad' })
   const waitId = (String(openedW).match(/session (\S+)/) ?? [])[1]
-  const badUntil = await run('shell_wait', { session: waitId, until: 'boo', timeout: 2000 })
+  const badUntil = await run('shell_read', { session: waitId, until: 'boo', timeout: 2000 })
   check(String(badUntil).includes('REFUSED') && String(badUntil).includes('until'),
     `非法 until 立即 REFUSED 并说明（${String(badUntil).split('\n')[0]}）`)
-  const badRe = await run('shell_wait', { session: waitId, until: 'match:[', timeout: 2000 })
+  const badRe = await run('shell_read', { session: waitId, until: 'match:[', timeout: 2000 })
   check(String(badRe).includes('REFUSED') && String(badRe).includes('正则'),
     `非法 match 正则立即 REFUSED（${String(badRe).split('\n')[0]}）`)
   await run('shell_manage', { action: 'close', session: waitId })
@@ -904,10 +906,11 @@ const idOf = async (label, callFn) => {
     `完全禁止档下 shell_open 直接被挡住：${openInDeny.message.slice(0, 40)}`)
   check(/不再询问/.test(openInDeny.message), '并说明"之后不再询问"（这是持久的别再问）')
   const listInDeny = await attempt(hDeny, 'shell_state', { scope: '*' })
-  check(listInDeny.ok === false && /完全禁止/.test(listInDeny.message), '完全禁止档连列 shell 都被挡住')
-  const stillQueryable = await attempt(hDeny, 'shell_consent', {})
-  check(stillQueryable.ok === true && /consent gate: enabled/.test(stillQueryable.value),
-    '但查询授权状态**仍然可用**（用户明确要求：完全禁止也要能查）')
+  // 0.2.3：shell_state 升为 none（吸收 shell_consent）—— 完全禁止也**能查状态与授权**
+  check(listInDeny.ok === true && /consent gate:/.test(listInDeny.value),
+    '完全禁止档下 shell_state 仍可查（吸收 shell_consent：授权状态照常汇报）')
+  check(/scope=deny/.test(listInDeny.value),
+    `并且如实标出本次对话的档位是 deny（${(listInDeny.value.match(/consent gate:[^\n]*/) ?? [''])[0]}）`)
   hDeny.cleanup()
 
   // (3) 冷却：拒绝之后不再反复询问（这才是"防止模型重复追问"的机制）
@@ -1134,30 +1137,172 @@ const idOf = async (label, callFn) => {
   hBtn.cleanup()
 }
 
-/* ── 7.94 shell_consent/* ── 7.94 shell_consent：让模型能查"我得到授权了吗"，但不许频繁查 ───────────── */
+/* ── 7.94 授权状态查询（0.2.3：shell_state 吸收 shell_consent；查询不触发确认弹窗） ──── */
 
 {
   const hConsent2 = await makeHarness({
     tgz, peersDir, socket: `${SOCKET}-qconsent`,
     config: { watchdog: false, __actor: 'consent-query-session' },
   })
-  const before = await hConsent2.run('shell_consent', {})
-  check(String(before).includes('consent gate: enabled'), `如实报告闸门状态：${String(before).split('\n')[0]}`)
-  check(String(before).includes('NOT YET'), '未授权时明确说"还没有"，并说明下一次调用会问一次')
-  check(String(before).includes('revoke') && String(before).includes('consent.json'),
-    '给出撤销方式（用户能自己收回授权）')
-  check(String(before).includes('this conversation: consent-query-session'),
-    '报告本次对话身份（而不是笼统的"已授权"）')
+  const before = await hConsent2.run('shell_state', {})
+  check(String(before).includes('consent gate:'), `shell_state 汇报闸门状态：${String(before).split('\n')[0]}`)
+  check(String(before).includes('NOT granted yet'), '未授权时明确说"还没有，下次调用会问一次"')
   check(hConsent2.consent.asks.length === 0, '查询本身**不会**触发确认弹窗（查就是查）')
+  // ③ 常用参数直接喂给 AI：上限/已用数/闲置开关等都在 JSON 块里，不用再翻设置文件
+  check(String(before).includes('◈ 常用参数(JSON):') && String(before).includes('"maxSessions"'),
+    'shell_state 附常用参数 JSON 块（maxSessions/sessionsUsed 等直达 AI）')
   await hConsent2.run('shell_open', { name: 'qconsent' })
-  const after = await hConsent2.run('shell_consent', {})
-  check(String(after).includes('granted: yes'), `授权后再查显示已授权：${String(after).split('\n')[2]}`)
+  const after = await hConsent2.run('shell_state', {})
+  check(String(after).includes('granted to this conversation'), `授权后再查显示已授权：${String(after).match(/consent gate:[^\n]*/)?.[0] ?? ''}`)
   await hConsent2.run('shell_manage', { action: 'close', session: await idOf('dsh-qconsent', hConsent2.call) })
-  // 工具描述里必须写明"别频繁查" —— 这条措辞是行为约束的一部分，用断言钉住
-  const desc = String(tools.get('shell_consent')?.description ?? '')
-  check(desc.includes('Do NOT call this routinely'), '工具描述里明确写了「不要例行调用」')
-  check(desc.includes('failed') || desc.includes('unclear'), '工具描述里说明了「只在需要时或失败时查」')
   hConsent2.cleanup()
+}
+
+/* ── 7.94b dryrun 预演护栏（吸收 shell_check）+ 闲置自动关闭时长接线 ─────────── */
+
+{
+  const hSand = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-dryrun-idle`,
+    config: { watchdog: false, idleClose: true, idleCloseMinutes: 42, __actor: 'dryrun-session' },
+  })
+  // 先开一个 shell：dryrun 的 "mine" 与闲置展示都需要它
+  const openedIdle = await hSand.run('shell_open', { name: 'idle-demo', idleMinutes: 7 })
+  check(String(openedIdle).includes('idle 7m'), `shell_open 创建时定死闲置时长：${String(openedIdle).split('\n')[0]}`)
+  const idleId = (String(openedIdle).match(/session (\S+)/) ?? [])[1]
+  // dryrun：危险命令只预演不发送（吸收 shell_check）
+  const dryBlocked = await hSand.run('shell_run', { session: 'mine', command: 'rm -rf /', dryrun: true })
+  check(String(dryBlocked).includes('nothing would be sent'),
+    `dryrun 危险命令 → REFUSED 且未发送（${String(dryBlocked).slice(0, 70)}）`)
+  const dryOk = await hSand.run('shell_run', { session: 'mine', command: 'echo ok', dryrun: true })
+  check(String(dryOk).includes('allowed'), `dryrun 普通命令 → allowed（${String(dryOk).slice(0, 50)}）`)
+  // 闲置：创建时定值（idleMinutes=7）→ shell_state 可见；shell_manage idle 可改 0（永不关）
+  const st = await hSand.run('shell_state', {})
+  check(String(st).includes(`idle=7m`), 'shell_state 每会话显示 idle=7m（统一分钟单位）')
+  const changed = await hSand.run('shell_manage', { action: 'idle', session: idleId, minutes: 0 })
+  check(String(changed).includes('idle auto-close = 0 分钟'), `shell_manage idle 改成 0（永不关）：${String(changed).trim()}`)
+  const st2 = await hSand.run('shell_state', {})
+  check(String(st2).includes('idle=0(off)'), 'shell_state 反映 idle=0(off)')
+  await hSand.run('shell_manage', { action: 'close', session: idleId })
+  hSand.cleanup()
+}
+
+/* ── 7.94c 0.2.3 新能力：结构化退出码(A) / 最近结果(B) / 快照复活(C) / 搜索(F) / 导出(E) ── */
+
+{
+  const hFeat = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-features`,
+    config: { watchdog: false, __actor: 'feat-session' },
+  })
+  const openedFeat = await hFeat.run('shell_open', { name: 'feat', cwd: '/tmp', cols: 80, rows: 24 })
+  const featId = (String(openedFeat).match(/session (\S+)/) ?? [])[1]
+  check(String(openedFeat).includes('idle 60m'), `open 输出带 idle 标注：${String(openedFeat).split('\n')[0]}`)
+
+  // A：结构化退出码。注意顺序：先跑"未包装"（ssh -h），否则滚动缓冲里残留的
+  // 退出码标记会干扰"无标记"断言；parseExitFromTail 取最后一条，所以真/假命令
+  // 必须先后验证且 buffer 里前面有标记 —— 正好覆盖"多标记取最后一个"的语义。
+  const noWrap = await hFeat.run('shell_run', { session: featId, command: 'ssh -h', lines: 3 })
+  check(!String(noWrap).includes('__DSH_EXIT__'), 'A: 交互式命令不包装（无退出码标记）')
+  const okRun = await hFeat.run('shell_run', { session: featId, command: 'true', lines: 5 })
+  check(String(okRun).includes('✅') && String(okRun).includes('exit 0'),
+    `A: true → ✅ exit 0（${String(okRun).split('\n')[0]}）`)
+  const badRun = await hFeat.run('shell_run', { session: featId, command: 'false', lines: 5 })
+  check(String(badRun).includes('❌') && String(badRun).includes('exit 1'),
+    `A: false → ❌ exit 1（buffer 有上一条标记时仍取最后一条：${String(badRun).split('\n')[0]}）`)
+  const verbatim = await hFeat.run('shell_run', { session: featId, command: 'false', structured: false, lines: 3 })
+  check(!String(verbatim).includes('❌'), 'A: structured=false → 原样发送、不取码')
+
+  // B：最近结果进 shell_state
+  const stFeat = await hFeat.run('shell_state', {})
+  check(/last=[✅❌?] \d+s/.test(String(stFeat)), `B: shell_state 显示最近结果（${(String(stFeat).match(/last=\S+ \d+s\(?[^ ]*\)?/) ?? [''])[0]}）`)
+
+  // F：全文搜索
+  await hFeat.run('shell_run', { session: featId, command: 'echo FINDME-42-MARK' })
+  const hit = await hFeat.run('shell_read', { session: featId, search: 'FINDME-42' })
+  check(String(hit).includes('FINDME-42-MARK') && /L\d+/.test(String(hit)),
+    `F: 搜索命中并带行号（${String(hit).split('\n')[0]}）`)
+  const badRe = await hFeat.run('shell_read', { session: featId, search: '[' })
+  check(String(badRe).includes('REFUSED'), `F: 非法正则立即 REFUSED（${String(badRe).split('\n')[0]}）`)
+
+  // C：快照 → 关闭 → 复活
+  const snap = await hFeat.run('shell_manage', { action: 'snapshot', session: featId })
+  check(String(snap).includes('快照已保存'), `C: 手动快照（${String(snap).trim().slice(0, 60)}）`)
+  await hFeat.run('shell_manage', { action: 'close', session: featId })
+  const revived = await hFeat.run('shell_open', { from: featId })
+  check(String(revived).includes('复原自快照') && String(revived).includes('/tmp'),
+    `C: 关闭后复活并还原场景（${String(revived).split('\n')[0]}）`)
+  const revivedId = (String(revived).match(/session (\S+)/) ?? [])[1]
+  const stRevived = await hFeat.run('shell_state', {})
+  check(String(stRevived).includes('label=dsh-feat'), 'C: 复活保留了 label')
+  await hFeat.run('shell_manage', { action: 'close', session: revivedId })
+
+  // E：导出原始 JSONL + CLI 离线复验
+  const exp = await hFeat.run('shell_audit', { export: true, days: 1 })
+  check(String(exp).includes('"prevHash"') && String(exp).includes('====='),
+    'E: 导出返回原始 JSONL（含 prevHash/hash 与按天表头）')
+  const dirMatch = /verify-audit ([^\s）]+)/.exec(String(exp))
+  check(dirMatch !== null, `E: 导出附带离线复验命令（目录 ${dirMatch === null ? '未给出' : dirMatch[1]}）`)
+  if (dirMatch !== null) {
+    const cli = spawnSync(process.execPath, [join(h.pkgDir, 'bin', 'dsh-agent-shell.mjs'), 'verify-audit', dirMatch[1]], { encoding: 'utf8' })
+    check(cli.status === 0 && String(cli.stdout).includes('链完整'),
+      `E: CLI verify-audit 离线复验通过（exit=${cli.status}，${(String(cli.stdout).split('\n').find((l) => l.includes('链')) ?? '').trim()}）`)
+    // 篡改一条 → 必须报断链（负例）
+    const day = readdirSync(dirMatch[1]).find((f) => /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+    const file = join(dirMatch[1], day)
+    const raw = readFileSync(file, 'utf8').trim().split('\n')
+    const tampered = JSON.parse(raw[0])
+    tampered.result = 'tampered-by-test'
+    raw[0] = JSON.stringify(tampered)
+    writeFileSync(file, raw.join('\n') + '\n')
+    const cli2 = spawnSync(process.execPath, [join(h.pkgDir, 'bin', 'dsh-agent-shell.mjs'), 'verify-audit', dirMatch[1]], { encoding: 'utf8' })
+    check(cli2.status === 1 && String(cli2.stdout).includes('断链'),
+      `E: 篡改后 CLI 复验报断链（exit=${cli2.status}，${(String(cli2.stdout).split('\n').find((l) => l.includes('断链')) ?? '').trim()}）`)
+    hFeat.auditTampered = true
+  }
+  hFeat.cleanup()
+}
+
+/* ── 7.94d AI 精准四件套：条件等待(1) / 失败摘要(2) / 重跑失败(4) / 会话自检(5) ── */
+
+{
+  const hAi = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-ai-precision`,
+    config: { watchdog: false, __actor: 'ai-session' },
+  })
+  const openedAi = await hAi.run('shell_open', { name: 'ai', cwd: '/tmp', cols: 80, rows: 24 })
+  const aiId = (String(openedAi).match(/session (\S+)/) ?? [])[1]
+
+  // 2 流：失败时给一句摘要（挑像错误的行），AI 不必读整屏
+  const failRun = await hAi.run('shell_run', { session: aiId, command: 'ls /nonexistent-xyz', lines: 8 })
+  check(String(failRun).includes('❌') && /No such file/i.test(String(failRun)),
+    `2: 失败摘要出现在返回头（${String(failRun).split('\n')[0].slice(0, 90)}）`)
+  check(String((await hAi.run('shell_state', {}))).includes('last=❌'),
+    '2: shell_state 的 last= 也带上失败')
+
+  // 4 流：重跑最近一条失败；最近一条不是失败时明确说明
+  const retried = await hAi.run('shell_run', { session: aiId, retry: 'last-failed', lines: 8 })
+  check(String(retried).includes('❌') && /No such file/i.test(String(retried)),
+    `4: retry=last-failed 重跑了同一条失败命令（${String(retried).split('\n')[0].slice(0, 70)}）`)
+  await hAi.run('shell_run', { session: aiId, command: 'true' })
+  const noFail = await hAi.run('shell_run', { session: aiId, retry: 'last-failed' })
+  check(String(noFail).includes('不是失败'), `4: 最近一条不是失败 → 明确说明（${String(noFail).trim().slice(0, 60)}）`)
+
+  // 1 流：waitFor（file / match / 非法 / 超时）
+  const flag = `/tmp/dsh-wait-${Date.now()}.flag`
+  const wf = await hAi.run('shell_run', { session: aiId, command: `sleep 0.4; touch ${flag}`, waitFor: `file:${flag}`, waitTimeout: 8000 })
+  check(String(wf).includes('✅ 条件达成'), `1: waitFor file 达成（${String(wf).split('\n')[0]}）`)
+  const wfMatch = await hAi.run('shell_run', { session: aiId, command: 'sleep 0.4; echo READY-MARK-9', waitFor: 'match:READY-MARK-9', waitTimeout: 8000 })
+  check(String(wfMatch).includes('✅ 条件达成'), `1: waitFor match 达成（${String(wfMatch).split('\n')[0]}）`)
+  const wfBad = await hAi.run('shell_run', { session: aiId, command: 'echo x', waitFor: 'nonsense' })
+  check(String(wfBad).includes('REFUSED'), `1: 非法 waitFor 立即 REFUSED（${String(wfBad).split('\n')[0]}）`)
+  const wfTimeout = await hAi.run('shell_run', { session: aiId, command: 'echo x', waitFor: 'file:/tmp/dsh-never-appears-xyz', waitTimeout: 900 })
+  check(String(wfTimeout).includes('❌ 等待超时'), `1: 条件不达成 → 超时返回（${String(wfTimeout).split('\n')[0]}）`)
+
+  // 5 流：doctor 自检
+  const doc = await hAi.run('shell_manage', { action: 'doctor', session: aiId })
+  check(String(doc).includes('缓冲') && String(doc).includes('留痕') && String(doc).includes('无活动'),
+    `5: doctor 给状态与可执行建议（${String(doc).split('\n')[0]}）`)
+  await hAi.run('shell_manage', { action: 'close', session: aiId })
+  hAi.cleanup()
 }
 
 /* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── *//* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */
@@ -1303,15 +1448,15 @@ const idOf = async (label, callFn) => {
   check(String(opened).includes('(dsh-audit-model)'), `开了审计用会话（label=dsh-audit-model, id=${auditId}）：${String(opened).split('\n')[0]}`)
   await run('shell_send', { session: auditId, text: 'echo audit-marker-555', keys: ['Enter'] }, EXEC)
   await settle()
-  // shell_wait match 只匹配**等待开始后新出现**的输出：屏上已经有的旧词不该假成功
+  // shell_read(until match) 只匹配**等待开始后新出现**的输出：屏上已经有的旧词不该假成功（0.2.3 吸收原 shell_wait）
   await run('shell_send', { session: auditId, text: 'echo OLD_MARK_777', keys: ['Enter'] }, EXEC)
   await settle()
-  const staleHit = await run('shell_wait', { session: auditId, until: 'match:OLD_MARK_777', timeout: 1500 }, EXEC)
+  const staleHit = await run('shell_read', { session: auditId, until: 'match:OLD_MARK_777', timeout: 1500 }, EXEC)
   check(String(staleHit).includes('timeout'),
     `match 不命中等待前屏上已有的旧词（增量语义，${String(staleHit).slice(0, 70)}）`)
   const freshSend = await run('shell_send', { session: auditId, text: 'sleep 1; echo FRESH_MARK_888', keys: ['Enter'] }, EXEC)
   // 不等它出结果直接进 wait：1 秒后输出才出现 → 属于"等待期间的新输出"（增量语义）
-  const freshHit = await run('shell_wait', { session: auditId, until: 'match:FRESH_MARK_888', timeout: 8000 }, EXEC)
+  const freshHit = await run('shell_read', { session: auditId, until: 'match:FRESH_MARK_888', timeout: 8000 }, EXEC)
   check(String(freshHit).includes('reached'),
     `match 命中等待后新出现的输出（${String(freshHit).slice(0, 70)}）`)
 
@@ -1388,14 +1533,17 @@ const idOf = async (label, callFn) => {
   await settle()
   const ownerRec = readLines().filter((r) => r.event === 'open' && r.shell === ownedId).pop()
   check(ownerRec !== undefined && ownerRec.actor !== '', '归属来自发起者的会话 id（面板建的则标 panel）')
-  check(String(listed2).includes(`owner=${ACTOR}`),
-    `归属值来自真实发起者的会话 id（不是猜的）：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
+  // 0.2.3：owner 显示**会话标题或短 id**（末 12 位保留原 id 可辨认段；本测试环境会话无标题，
+  // 因此应看到 …<末12位>，而不是一串 UUID）。
+  const ownerSeg = String(ACTOR).slice(-12)
+  check(/owner=[^\n]*…?[a-zA-Z0-9-]*n-under-test/.test(String(listed2)) || String(listed2).includes(`owner=…${ownerSeg}`),
+    `归属值看得出发自真实发起者（短 id 保留末 12 位）：${String(listed2).split('\n').find((l) => l.includes('audit-owned'))}`)
   // 插件之外建的会话（同 socket 上手工开的）必须如实标 unknown，而不是猜一个看起来像答案的值
   tmux(['new-session', '-d', '-s', 'dsh-outside', '-x', '80', '-y', '24'])
   await new Promise((r) => setTimeout(r, 300))
   const listed3 = await run('shell_state', { scope: '*' })
-  check(String(listed3).includes('dsh-outside') && /dsh-outside[^\n]*owner=unknown/.test(String(listed3)),
-    `插件之外建的会话如实标 unknown：${String(listed3).split('\n').find((l) => l.includes('dsh-outside'))}`)
+  check(String(listed3).includes('dsh-outside') && /dsh-outside[^\n]*owner=未知/.test(String(listed3)),
+    `插件之外建的会话如实标「未知」：${String(listed3).split('\n').find((l) => l.includes('dsh-outside'))}`)
   tmux(['kill-session', '-t', 'dsh-outside'])
   // 非 owner 依然可操作 —— D1 是标注而非隔离，这里把这条**刻意**钉住，避免以后被误改成拦截
   const crossSend = await call('/keys', 'POST', { name: ownedId, text: 'echo cross-actor-ok', keys: ['Enter'] })

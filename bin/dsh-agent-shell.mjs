@@ -6,6 +6,7 @@
  *   npx -y dsh-agent-shell install   [--profile <name>] [--dry-run] [--yes]
  *   npx -y dsh-agent-shell uninstall [--profile <name>] [--dry-run]
  *   dsh-agent-shell doctor
+ *   dsh-agent-shell verify-audit [<审计目录>] [--json]
  *   dsh-agent-shell --version | --help
  *
  * install 做什么（全部可 --dry-run 预览）：
@@ -188,11 +189,52 @@ if (args.includes('--help') || args.includes('-h') || args.length === 0) {
   dsh-agent-shell install [--profile <name>] [--dry-run]   安装到 DSH profile（--dry-run 只预览）
   dsh-agent-shell uninstall [--profile <name>] [--dry-run]         从 profile 移除
   dsh-agent-shell doctor                                           体检：tmux / 安装状态 / 数据目录
+  dsh-agent-shell verify-audit [<审计目录>] [--json]               离线复验审计哈希链（默认 ~/.dsh/agent-shell）
   dsh-agent-shell --version | --help
 `)
   process.exit(0)
 }
+/**
+ * 离线复验审计哈希链（E 流）。
+ *
+ * 与插件内 `shell_audit` 的链状态是同一份实现（lib/audit.js 的 readSealedChain + verifyChain），
+ * 但**不依赖运行中的 DSH**：拿导出/备份的目录就能验。退出码 0 = 链完整，1 = 断链，2 = 用法错误。
+ * 这样"可验证的不可篡改记录"不只是一句承诺：用户/CI 可以自己复算。
+ */
+async function verifyAudit () {
+  const dir = args.find((a) => !a.startsWith('--') && a !== 'verify-audit' && a !== 'doctor' && a !== 'install' && a !== 'uninstall') ??
+    join(homedir(), '.dsh', 'agent-shell')
+  if (!existsSync(dir)) {
+    console.error(`✗ 审计目录不存在：${dir}`)
+    process.exit(2)
+  }
+  const { readSealedChain } = await import('../lib/audit.js')
+  const chain = await readSealedChain({ dir })
+  const v = chain.verify
+  if (flag('json')) {
+    console.log(JSON.stringify({
+      dir, days: chain.days, records: chain.records.length, ...v, brokenAt: v.brokenAt
+    }, null, 2))
+  } else {
+    console.log(`审计目录：${dir}`)
+    console.log(`按天文件：${chain.days.length} 个（${chain.days.join(', ') || '（无）'}）`)
+    console.log(`记录数：${chain.records.length}（已封链 ${v.sealed}）`)
+    if (v.ok) {
+      console.log(`✓ 链完整${v.startUnknown ? '（起点未知：更早的文件不在本目录，属正常）' : ''} · 头 ${String(v.head).slice(0, 16)}`)
+    } else {
+      const ba = v.brokenAt ?? {}
+      const idx = typeof ba.index === 'number' ? ba.index + 1 : '?'
+      const hint = ba.hint === 'cold-start-genesis'
+        ? '—— 冷启动/热重载竞态（旧版本缺陷），非篡改迹象'
+        : '—— 审计可能被篡改或写坏'
+      console.log(`✗ 断链于第 ${idx} 条（${ba.reason ?? '?'}）${hint}`)
+    }
+  }
+  process.exit(v.ok ? 0 : 1)
+}
+
 if (args.includes('install')) { install(); process.exit(0) }
 if (args.includes('uninstall')) { uninstall(); process.exit(0) }
 if (args.includes('doctor')) { doctor(); process.exit(0) }
+if (args.includes('verify-audit')) { await verifyAudit() }
 fail(`未知命令：${args[0] ?? ''}（用 --help 看用法）`)

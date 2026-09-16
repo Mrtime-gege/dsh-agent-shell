@@ -218,8 +218,8 @@ mod.apply(ctx, {
   extendedKeys: true, auditDir: join(root, 'audit'),
 })
 
-check(tools.size === 10, `注册工具数 = ${tools.size}（期望 10——v2 工具面）`)
-check(routes.size === 11, `注册 HTTP 路由数 = ${routes.size}（期望 11）`)
+check(tools.size === 7, `注册工具数 = ${tools.size}（期望 7——0.2.3 精简：shell_wait→shell_read、shell_check→dryrun、shell_consent→shell_state）`)
+check(routes.size === 14, `注册 HTTP 路由数 = ${routes.size}（期望 14：list/screen/audit/consent/settings/diagnose/debugctl/keys/new/kill/resize/rename/busy/actors）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
 {
@@ -231,9 +231,16 @@ check(routes.size === 11, `注册 HTTP 路由数 = ${routes.size}（期望 11）
   check(probe.includes('结论：'), `给出明确结论：${probe.split('\n').filter((l) => l.startsWith('结论')).join(' ')}`)
 }
 
-await new Promise(r => setTimeout(r, 300))
-const conf = readFileSync(`/tmp/${SOCKET}-tmux.conf`, 'utf8')
-check(conf.includes('extended-keys on'), 'extendedKeys: true 已写进服务端启动配置')
+// conf 由「首次会话创建时的 writeServerConfig」写入；0.2.2 起那一步在 ready（env 探测+tmux 体检）之后，
+// 所以这里轮询等它出现（tmux ≥3.2 时 extended-keys 应写入；版本压制逻辑也在这里被验证）
+let conf = ''
+for (let i = 0; i < 150; i += 1) {
+  const p = `/tmp/${SOCKET}-tmux.conf`
+  conf = existsSync(p) ? readFileSync(p, 'utf8') : ''
+  if (conf.includes('extended-keys on')) break
+  await new Promise(r => setTimeout(r, 100))
+}
+check(conf.includes('extended-keys on'), 'extendedKeys: true 且 tmux ≥3.2 → 已写进服务端启动配置')
 
 const opened = await run('shell_open', { name: 'smoke', cols: 90, rows: 24 })
 const session = (opened.match(/session (\S+)/) ?? [])[1]
@@ -277,6 +284,81 @@ check(list.body?.sessions?.length === 2, `GET /list → ${list.body?.sessions?.l
 const viaHttp = await call('/rename', 'POST', { name: created.body.name, newName: 'http2' })
 check(viaHttp.body?.name === created.body.name && viaHttp.body?.label === 'dsh-http2',
   `POST /rename 只改 label：id=${viaHttp.body?.name} label=${viaHttp.body?.label}`)
+
+/* ---------- 幽灵归属条目不拖垮 "mine" 寻址 ---------- */
+// 会话绕过插件死在 tmux 侧（外部 kill / 看门狗收割 / 旧版本遗留）时，
+// sessions.json 里的归属条目会残留。"mine"（本对话非面板创建的会话）必须
+// 跳过已死会话，而不是在第一个幽灵上整体报错（实测：can't find pane: dsh-latency）。
+const ghostOpen = await run('shell_open', { name: 'ghost', cols: 80, rows: 24 })
+const ghostId = (ghostOpen.match(/session (\S+)/) ?? [])[1]
+check(/^dsh-[a-z0-9]+$/.test(ghostId), `为幽灵测试另开一个工具会话：${ghostId}`)
+execFileSync('tmux', ['-L', SOCKET, 'kill-session', '-t', ghostId], { stdio: 'ignore' })
+await new Promise(r => setTimeout(r, 500))
+let mineRun = 'ERR'
+try { mineRun = await run('shell_run', { session: 'mine', command: 'echo MINE-OK', lines: 6 }) } catch (error) { mineRun = 'ERR: ' + String(error?.message ?? error) }
+check(mineRun.includes('MINE-OK') && !mineRun.startsWith('ERR'),
+  `"mine" 跳过幽灵归属（kill 掉 ${ghostId} 后仍送达存活会话）—— ${mineRun.slice(0, 70)}`)
+
+/* ---------- 0.2.3 精简与闲置接线（真实 tmux 上跑一遍） ---------- */
+
+// dryrun：危险命令只预演不发送（吸收 shell_check）
+const dryBlocked = await run('shell_run', { session: 'mine', command: 'rm -rf /', dryrun: true })
+check(dryBlocked.includes('nothing would be sent') && !dryBlocked.includes('alive'),
+  `dryrun 危险命令 REFUSED 且未发送（${dryBlocked.split('\n')[0]}）`)
+const dryOk = await run('shell_run', { session: 'mine', command: 'echo ok', dryrun: true })
+check(dryOk.includes('allowed'), `dryrun 普通命令 allowed（${dryOk.split('\n')[0]}）`)
+
+// 闲置：创建时定值 → shell_state 可见 → shell_manage idle 可改 0（永不关）
+const idleOpen = await run('shell_open', { name: 'idle-demo', idleMinutes: 7, cols: 80, rows: 24 })
+check(String(idleOpen).includes('idle 7m'), `shell_open 定死闲置时长：${String(idleOpen).split('\n')[0]}`)
+const idleId = (String(idleOpen).match(/session (\S+)/) ?? [])[1]
+check((await run('shell_state', {})).includes('idle=7m'), 'shell_state 每会话显示 idle=7m（统一分钟单位）')
+check((await run('shell_manage', { action: 'idle', session: idleId, minutes: 0 })).includes('idle auto-close = 0 分钟'),
+  'shell_manage idle 改成 0（永不自动关闭）')
+check((await run('shell_state', {})).includes('idle=0(off)'), 'shell_state 反映 idle=0(off)')
+// shell_state 附常用参数 JSON 块（③：参数直达 AI）
+const stJson = await run('shell_state', {})
+check(stJson.includes('◈ 常用参数(JSON):') && stJson.includes('"maxSessions"') && stJson.includes('"sessionsUsed"'),
+  'shell_state 附常用参数 JSON 块（maxSessions/sessionsUsed 直达 AI）')
+await run('shell_manage', { action: 'close', session: idleId })
+
+/* ---------- 0.2.3 新能力（A 退出码 / C 快照复活 / E 导出 / F 搜索）接线 ---------- */
+
+const featOpen = await run('shell_open', { name: 'feat', cwd: '/tmp', cols: 80, rows: 24 })
+const featId = (String(featOpen).match(/session (\S+)/) ?? [])[1]
+const featRun = await run('shell_run', { session: featId, command: 'echo FTR-42; sh -c \'exit 3\'', lines: 4 })
+check(String(featRun).includes('❌') && String(featRun).includes('exit 3'),
+  `A: 退出码捕获（${String(featRun).split('\n')[0]}）`)
+const featSearch = await run('shell_read', { session: featId, search: 'FTR-' })
+check(/L\d+\s+FTR-/.test(String(featSearch)), `F: 搜索命中带行号（${String(featSearch).split('\n')[0]}）`)
+const retryRun = await run('shell_run', { session: featId, retry: 'last-failed', lines: 4 })
+check(String(retryRun).includes('❌') && String(retryRun).includes('exit 3'),
+  `4: retry=last-failed 重跑失败命令（${String(retryRun).split('\n')[0]}）`)
+const smokeFlag = `/tmp/dsh-smoke-wait-${Date.now()}.flag`
+const waitRun = await run('shell_run', { session: featId, command: `sleep 0.3; touch ${smokeFlag}`, waitFor: `file:${smokeFlag}`, waitTimeout: 8000 })
+check(String(waitRun).includes('✅ 条件达成'), `1: waitFor file 达成（${String(waitRun).split('\n')[0]}）`)
+// 1b：等待词只出现在"命令回显"里、输出里没有 → 必须超时而不是 0.0s 自匹配
+const echoToken = `SMK-${Date.now()}-ECHO`
+const matchSelf = await run('shell_run', {
+  session: featId,
+  command: `x=${echoToken}; date +%s`,
+  waitFor: `match:${echoToken}`,
+  waitTimeout: 1500,
+})
+check(String(matchSelf).includes('❌ 等待超时'),
+  `1b: 回显里的等待词不算输出（剥回显；${String(matchSelf).split('\n')[0]}）`)
+const docRun = await run('shell_manage', { action: 'doctor', session: featId })
+check(String(docRun).includes('缓冲') && String(docRun).includes('无活动'),
+  `5: doctor 自检（${String(docRun).split('\n')[0]}）`)
+await run('shell_manage', { action: 'snapshot', session: featId })
+await run('shell_manage', { action: 'close', session: featId })
+const revived = await run('shell_open', { from: featId })
+check(String(revived).includes('复原自快照') && String(revived).includes('/tmp'),
+  `C: 关闭后快照复活还原场景（${String(revived).split('\n')[0]}）`)
+const featExport = await run('shell_audit', { export: true, days: 1 })
+check(String(featExport).includes('"prevHash"') && String(featExport).includes('====='),
+  'E: 导出原始 JSONL（含 prevHash/hash 与按天表头）')
+await run('shell_manage', { action: 'close', session: (String(revived).match(/session (\S+)/) ?? [])[1] })
 
 check((await run('shell_manage', { action: 'close', session })).includes('closed'), 'shell_manage close 生效')
 check((await run('shell_manage', { action: 'close', session: created.body.name })).includes('closed'),
@@ -324,7 +406,7 @@ if (hasHarness) {
 }
 
 // (2) pid 文件记着「别的 harness」+ 服务端上有活会话 → 必须收养，不许清
-await run('shell_open', { name: 'keepme', cols: 80, rows: 24 })
+const openKeep = await run('shell_open', { name: 'keepme', cols: 80, rows: 24 })
 execFileSync('sh', ['-c', `printf '%s\\n' '999999 424242' > ${pidFile}`])
 const boot = await driver.bootstrap()
 const kept = await call('/list', 'GET')
@@ -332,7 +414,8 @@ check(boot.adopted === false && boot.kept.length >= 1, `bootstrap 报告保住�
 check(kept.body?.sessions?.length === 1, `pid 文件指向别的 harness 时，会话仍在（${kept.body?.sessions?.length} 个）`)
 if (hasHarness) check(boot.watchdogPid !== '', `重新布防了看门狗：pid ${boot.watchdogPid}`)
 else console.log('  · 无 harness 祖先，跳过「看门狗已重新布防」断言（布防本就无法进行）')
-await run('shell_manage', { action: 'close', session: keepmeId })
+const keepId = (String(openKeep).match(/session (\S+)/) ?? [])[1]
+await run('shell_manage', { action: 'close', session: keepId })
 
 // (3) 看门狗静默死亡 → 下一次操作必须自愈重布防（节流窗口 5 秒，故先等过去）
 if (hasHarness) {

@@ -76,6 +76,30 @@ const mkIO = ({ tmuxV = 'tmux 3.6b', tmuxOk = true, systemdRun = true, systemdDi
   check(envD.tmpDir.includes('termux'), `D tmpDir 走 os.tmpdir（Android 无 /tmp）：${envD.tmpDir}`)
 }
 
+/* ── 1b. 宿主预置（io.tmux）优先于直连探测：修复 env.mjs:76 的回归 ────────────── */
+
+{
+  // 真实运行里 driver 的 tmux 探测走 subprocess 服务（可靠），本模块直连 execFile 在
+  // 受限 harness 里会失败（实测：dsh web 沙箱 tmux -V 直连失败而 driver 正常）。
+  // 修复前 detectEnv 返回的是直连原始结果 hasTmux: okText，把 preset 感知值丢掉 →
+  // 看门狗被误关（planFor.watchdog = 'off'）。以下两条就是那个场景的回归断言。
+  const directFail = mkIO({ tmuxOk: false, tmuxV: 'tmux 3.6b' })
+
+  // preset 说 tmux ok、直连失败 → 必须按 preset 判 hasTmux=true、看门狗照常
+  const envPresetOk = await detectEnv({ ...directFail, tmux: { ok: true, version: 'tmux 3.6b' } })
+  const planPresetOk = planFor(envPresetOk)
+  check(envPresetOk.hasTmux === true && envPresetOk.tmuxVer?.[0] === 3,
+    `preset ok + 直连失败 → hasTmux=${envPresetOk.hasTmux} ver=${JSON.stringify(envPresetOk.tmuxVer)}（修复前会是 false）`)
+  check(planPresetOk.watchdog === 'lease-node' && planPresetOk.extendedKeys === true,
+    `preset ok + 直连失败 → 看门狗照常：${planPresetOk.watchdog} / extendedKeys=${planPresetOk.extendedKeys}`)
+
+  // 反方向：直连 ok、preset 说没有 → preset 仍优先（能力保守）
+  const envPresetNo = await detectEnv({ ...mkIO({ tmuxOk: true }), tmux: { ok: false, version: null } })
+  const planPresetNo = planFor(envPresetNo)
+  check(envPresetNo.hasTmux === false, `preset no + 直连 ok → hasTmux=${envPresetNo.hasTmux}（preset 优先）`)
+  check(planPresetNo.watchdog === 'off', `preset no → 看门狗 ${planPresetNo.watchdog}（按 preset 保守关闭）`)
+}
+
 /* ── 2. 降级路径真跑主干（driver 拨档后 open→send→capture→close）────────────── */
 
 const tgz = packIntoTemp()
