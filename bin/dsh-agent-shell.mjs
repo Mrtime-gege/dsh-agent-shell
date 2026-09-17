@@ -18,7 +18,7 @@
  * 零外部依赖（只用 Node 内建），可离线跑。
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -233,8 +233,110 @@ async function verifyAudit () {
   process.exit(v.ok ? 0 : 1)
 }
 
+/* ── 0.3.0 vault / macros：人这一侧的录入通道（面板「秘密与宏」的 CLI 等价物）──────
+ * vault 只有人与面板能写 —— AI 的工具面没有写入口，只能 {{v:键名}} 引用。
+ * 用法：
+ *   dsh-agent-shell vault list
+ *   dsh-agent-shell vault set <键> <值> [--one-shot] [--note 备注] [--audit-dir 目录]
+ *   dsh-agent-shell vault rm <键>
+ *   dsh-agent-shell macros list | set <名> <内容> [--scope global|conversation] [--no-submit] [--note 备注] | rm <名>
+ */
+function auditDirOf() {
+  return flagValue('audit-dir', join(dshHome(), 'agent-shell'))
+}
+function readJsonFile(p) { try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return {} } }
+function writeJson0600(p, obj) { writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 }) }
+function positional(skip) {
+  return args.filter((a) => !a.startsWith('--') && !skip.includes(a))
+}
+
+function vaultCli() {
+  const sub = positional(['vault'])[0] ?? 'list'
+  const dir = auditDirOf()
+  const file = join(dir, 'vault.json')
+  const vault = readJsonFile(file)
+  if (sub === 'list') {
+    const items = Object.entries(vault)
+    if (items.length === 0) { echo('(vault 为空 —— 用 vault set <键> <值> 录入)'); return }
+    for (const [k, e] of items) {
+      echo(`{{v:${k}}}  ${e.oneShot === true ? '一次性' : '可重复'}  用过 ${e.uses ?? 0} 次${e.note ? '  — ' + e.note : ''}`)
+    }
+    return
+  }
+  if (sub === 'set') {
+    const [key, value] = positional(['vault', 'set'])
+    if (!key || !/^[A-Za-z0-9_.-]{1,64}$/.test(key)) fail('键名须为字母数字._-（≤64 字符）')
+    if (value === undefined) fail('用法：vault set <键> <值> [--one-shot] [--note 备注]')
+    vault[key] = {
+      value, kind: flagValue('kind', 'secret'), oneShot: flag('one-shot'),
+      note: flagValue('note', '').slice(0, 120),
+      uses: Number(vault[key]?.uses ?? 0),
+      createdAt: Number(vault[key]?.createdAt ?? Date.now()), updatedAt: Date.now(),
+    }
+    mkdirSync(dir, { recursive: true })
+    writeJson0600(file, vault)
+    ok(`{{v:${key}}} 已保存（${vault[key].oneShot ? '一次性：注入成功即焚' : '可重复'}）→ ${file}（0600）`)
+    echo('  边界：AI 只见键名，值不上屏不进账；但 output/ 留痕是原始字节流（值进过 pane 就在里面）—— 详见 SECURITY。')
+    return
+  }
+  if (sub === 'rm') {
+    const [key] = positional(['vault', 'rm'])
+    if (vault[key] === undefined) fail(`没有键 ${key ?? '(缺参数)'}`)
+    delete vault[key]
+    writeJson0600(file, vault)
+    ok(`{{v:${key}}} 已删除`)
+    return
+  }
+  fail(`未知 vault 子命令：${sub}（list / set / rm）`)
+}
+
+function macrosCli() {
+  const sub = positional(['macros'])[0] ?? 'list'
+  const dir = auditDirOf()
+  const file = join(dir, 'macros.json')
+  const macros = readJsonFile(file)
+  if (sub === 'list') {
+    const items = Object.entries(macros)
+    if (items.length === 0) { echo('(还没有宏 —— 用 macros set <名> <内容> 创建)'); return }
+    for (const [k, m] of items) {
+      echo(`{{m:${k}}}  scope=${m.scope ?? 'global'}  submit=${m.submit !== false}${m.note ? '  — ' + m.note : ''}\n    ${String(m.text ?? '').replace(/\n/g, '⏎').slice(0, 120)}`)
+    }
+    return
+  }
+  if (sub === 'set') {
+    const [name, text] = positional(['macros', 'set'])
+    if (!name || !/^[A-Za-z0-9_.-]{1,64}$/.test(name)) fail('宏名须为字母数字._-（≤64 字符）')
+    if (text === undefined || text.trim() === '') fail('用法：macros set <名> <内容> [--scope global|conversation] [--no-submit] [--note 备注]')
+    if (text.length > 8000) fail('宏内容超过 8000 字符')
+    if (/\{\{/.test(text.replace(/\{\{\s*v:[^}]*\}\}/g, ''))) fail('宏里只准嵌 {{v:键名}}（不能嵌宏/裸键：只展开一层）')
+    const scope = flagValue('scope', 'global')
+    if (!['global', 'conversation'].includes(scope)) fail('--scope 只接受 global / conversation（shell 域请用面板或工具）')
+    macros[name] = {
+      text, scope, owner: 'cli', submit: !flag('no-submit'),
+      note: flagValue('note', '').slice(0, 120),
+      createdAt: Number(macros[name]?.createdAt ?? Date.now()), updatedAt: Date.now(), updatedBy: 'cli',
+    }
+    mkdirSync(dir, { recursive: true })
+    writeJson0600(file, macros)
+    ok(`{{m:${name}}} 已保存（scope=${scope}, submit=${macros[name].submit}）`)
+    echo('  提示：面板/工具侧的写入会进审计封链；CLI 直写不进链 —— 重要宏建议走面板。')
+    return
+  }
+  if (sub === 'rm') {
+    const [name] = positional(['macros', 'rm'])
+    if (macros[name] === undefined) fail(`没有宏 ${name ?? '(缺参数)'}`)
+    delete macros[name]
+    writeJson0600(file, macros)
+    ok(`{{m:${name}}} 已删除`)
+    return
+  }
+  fail(`未知 macros 子命令：${sub}（list / set / rm）`)
+}
+
 if (args.includes('install')) { install(); process.exit(0) }
 if (args.includes('uninstall')) { uninstall(); process.exit(0) }
 if (args.includes('doctor')) { doctor(); process.exit(0) }
+if (args.includes('vault')) { vaultCli(); process.exit(0) }
+if (args.includes('macros')) { macrosCli(); process.exit(0) }
 if (args.includes('verify-audit')) { await verifyAudit() }
 fail(`未知命令：${args[0] ?? ''}（用 --help 看用法）`)

@@ -219,7 +219,7 @@ mod.apply(ctx, {
 })
 
 check(tools.size === 7, `注册工具数 = ${tools.size}（期望 7——0.2.3 精简：shell_wait→shell_read、shell_check→dryrun、shell_consent→shell_state）`)
-check(routes.size === 14, `注册 HTTP 路由数 = ${routes.size}（期望 14：list/screen/audit/consent/settings/diagnose/debugctl/keys/new/kill/resize/rename/busy/actors）`)
+check(routes.size === 20, `注册 HTTP 路由数 = ${routes.size}（期望 20：list/screen/audit/consent/settings/diagnose/debugctl/keys/new/kill/resize/rename/busy/actors + 0.3.0 双域六条 vault-list/set/rm + macro-list/set/rm）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
 {
@@ -308,14 +308,18 @@ check(dryBlocked.includes('nothing would be sent') && !dryBlocked.includes('aliv
 const dryOk = await run('shell_run', { session: 'mine', command: 'echo ok', dryrun: true })
 check(dryOk.includes('allowed'), `dryrun 普通命令 allowed（${dryOk.split('\n')[0]}）`)
 
-// 闲置：创建时定值 → shell_state 可见 → shell_manage idle 可改 0（永不关）
+// 闲置 0.3.0：默认永久；显式正值启用；0/-1 显式豁免。创建时定值 → state 可见 → manage idle 可改
 const idleOpen = await run('shell_open', { name: 'idle-demo', idleMinutes: 7, cols: 80, rows: 24 })
-check(String(idleOpen).includes('idle 7m'), `shell_open 定死闲置时长：${String(idleOpen).split('\n')[0]}`)
+check(String(idleOpen).includes('idle=7m'), `shell_open 显式定闲置时长：${String(idleOpen).split('\n')[0]}`)
 const idleId = (String(idleOpen).match(/session (\S+)/) ?? [])[1]
 check((await run('shell_state', {})).includes('idle=7m'), 'shell_state 每会话显示 idle=7m（统一分钟单位）')
-check((await run('shell_manage', { action: 'idle', session: idleId, minutes: 0 })).includes('idle auto-close = 0 分钟'),
-  'shell_manage idle 改成 0（永不自动关闭）')
-check((await run('shell_state', {})).includes('idle=0(off)'), 'shell_state 反映 idle=0(off)')
+check((await run('shell_manage', { action: 'idle', session: idleId, minutes: -1 })).includes('永不自动关闭'),
+  'shell_manage idle 改成 -1（0/-1 同义：显式豁免）')
+check((await run('shell_state', {})).includes('idle=0(永不)'), 'shell_state 反映 idle=0(永不)')
+const noIdle = await run('shell_open', { name: 'idle-none', cols: 80, rows: 24 })
+const noIdleId = (String(noIdle).match(/session (\S+)/) ?? [])[1]
+check(String(noIdle).includes('永久(未指定)'), `0.3.0 默认永久：不传 idleMinutes 不自动关（${String(noIdle).split('\n')[0]}）`)
+await run('shell_manage', { action: 'close', session: noIdleId })
 // shell_state 附常用参数 JSON 块（③：参数直达 AI）
 const stJson = await run('shell_state', {})
 check(stJson.includes('◈ 常用参数(JSON):') && stJson.includes('"maxSessions"') && stJson.includes('"sessionsUsed"'),
@@ -350,6 +354,48 @@ check(String(matchSelf).includes('❌ 等待超时'),
 const docRun = await run('shell_manage', { action: 'doctor', session: featId })
 check(String(docRun).includes('缓冲') && String(docRun).includes('无活动'),
   `5: doctor 自检（${String(docRun).split('\n')[0]}）`)
+// ── 0.3.0：steps/expect · summary · ifChanged · search context · macros · claim/release ──
+const stepsOk = await run('shell_run', { session: featId, steps: [
+  { send: 'echo SMK-S1', expect: 'match:SMK-S1', timeout: 5000 },
+  { send: 'sleep 0.5; echo SMK-S2', expect: 'match:SMK-S2', timeout: 5000 },
+] })
+check(String(stepsOk).includes('全部 2 步通过'), `0.3.0 steps/expect 一次调用跑完序列（${String(stepsOk).split('\n')[0]}）`)
+const stepsFail = await run('shell_run', { session: featId, steps: [
+  { send: 'echo SMK-S3', expect: 'match:NEVER-APPEARS-XYZ', timeout: 1200 },
+] })
+check(String(stepsFail).includes('FAILED s1') && String(stepsFail).includes('现场'),
+  `0.3.0 steps 失败即回现场并中止（${String(stepsFail).split('\n')[0]}）`)
+const stepsGuard = await run('shell_run', { session: featId, steps: [{ send: 'rm -rf /', expect: 'idle' }] })
+check(String(stepsGuard).includes('FAILED') && String(stepsGuard).includes('护栏'),
+  '0.3.0 steps 里的危险命令同样被护栏拦（没发送）')
+const summaryRun = await run('shell_read', { session: featId, mode: 'summary' })
+check(String(summaryRun).includes('cwd=') && String(summaryRun).includes('fg='),
+  `0.3.0 语义读屏 summary（${String(summaryRun).split('\n')[0].slice(0, 80)}）`)
+await run('shell_read', { session: featId, mode: 'tail', lines: 5, ifChanged: true })
+const againRun = await run('shell_read', { session: featId, mode: 'tail', lines: 5, ifChanged: true })
+check(String(againRun).includes('unchanged'), `0.3.0 ifChanged 幂等读（${String(againRun).split('\n')[0]}）`)
+const ctxRun = await run('shell_read', { session: featId, search: 'SMK-S3', context: 1 })
+check(String(ctxRun).includes('>L'), `0.3.0 search 上下文行（${String(ctxRun).split('\n')[0]}）`)
+await run('shell_manage', { action: 'macro-set', name: 'smoke-m1', text: 'echo SMK-MACRO-OK', scope: 'global' })
+const macroRun = await run('shell_run', { session: featId, command: '{{m:smoke-m1}}' })
+check(String(macroRun).includes('SMK-MACRO-OK'), `0.3.0 宏展开发送（${String(macroRun).split('\n')[0]}）`)
+check(String(await run('shell_manage', { action: 'macro-list' })).includes('smoke-m1'), '0.3.0 macro-list 可见')
+const badRef = await run('shell_run', { session: featId, command: 'echo {{v:no-such-key}}' })
+check(String(badRef).includes('REFUSED') && String(badRef).includes('no-such-key'),
+  '0.3.0 缺失引用 → REFUSED（字面 {{…}} 永不发送）')
+await run('shell_manage', { action: 'macro-rm', name: 'smoke-m1' })
+const relRun = await run('shell_manage', { action: 'release', session: featId })
+check(String(relRun).includes('已交还用户') && String(relRun).includes('tmux -L'),
+  `0.3.0 release 交还 + 给出人的接管命令（${String(relRun).split('\n')[0]}）`)
+const blocked = await run('shell_run', { session: featId, command: 'echo SHOULD-NOT-RUN' })
+check(String(blocked).includes('REFUSED') && !String(blocked).includes('SHOULD-NOT-RUN\n'),
+  '0.3.0 released 后 AI 写被拒（读不受影响）')
+check(String(await run('shell_read', { session: featId, mode: 'summary' })).includes('cwd='),
+  '0.3.0 released 会话仍可读（交还≠失联）')
+const claimRun = await run('shell_manage', { action: 'claim', session: featId })
+check(String(claimRun).includes('已接管'), `0.3.0 claim 收回（${String(claimRun).split('\n')[0]}）`)
+check(String(await run('shell_run', { session: featId, command: 'echo CLAIM-OK' })).includes('CLAIM-OK'),
+  '0.3.0 claim 后恢复可写')
 await run('shell_manage', { action: 'snapshot', session: featId })
 await run('shell_manage', { action: 'close', session: featId })
 const revived = await run('shell_open', { from: featId })

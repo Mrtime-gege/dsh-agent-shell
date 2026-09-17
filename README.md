@@ -19,7 +19,7 @@
 4. **唯一防线只是启发式护栏。** `guardDangerousCommands` 默认开，做关键词匹配（`rm -rf /`、`mkfs`、`dd of=/dev/*` 等）；**可被变量/脚本/拼接轻易绕过，也会误报**。它是减速带，不是防护。
 5. **审计 = "可检测"，不是"不可篡改"（默认）**：哈希链能发现"删过/改过/调过序"，但**同权限的 AI 本就能改审计文件**（它能拿到 shell）；要升级到不可删/改需 `chattr +a`（见[审计](#审计哈希链--可选加锁)）。
 6. **ssh/远程只有"录像级"审计**：记录的是**进出隧道的键与屏**，不是远端机器上实际执行了什么。
-7. **闲置自动关闭真的会关（0.2.3 起默认开）**：会话连续 `idleCloseMinutes`（默认 60）分钟没有**输入或运行**就**自动关闭**并记审计——AI 工具与面板的输入都算（被护栏拦下的企图也算），**只读屏/查询不算活动**（否则面板开着就永远不关）。临时不想让它动：关掉设置 `idleClose`，或对个别会话 `shell_manage action=idle` 设 0（永不关）。
+7. **闲置自动关闭（0.3.0 起默认关 = 会话永久保留）**：默认**不会**有任何会话被自动回收。只有显式启用才会关——单个会话 `shell_open idleMinutes=30`（正数分钟）或打开全局开关 `idleClose`（给未指定时长的会话兜底 `idleCloseMinutes`）；`0`/`-1`/不指定 = 永不自动关闭。启用后的判定：连续无**输入或运行**（AI 工具与面板输入含被拦企图都算活动；只读屏/查询不算，否则面板开着永不关），到点关闭并记审计 `reason=idle-timeout`。
 8. **整机重启会丢会话**：`dsh` 自身重启会话存活（systemd 用户 scope）；但**整机/虚拟机重启**（如 WSL2 VM 休眠/重启）会连 tmux 一起带走——tmux 会话不落盘，属于平台层限制。重要工作先落盘文件。
 9. **不要放进生产/多用户/有不可替代数据的机器**；内部测试、可重建的环境、你想清楚后果的自用机器才合适。重要数据先备份。
 
@@ -68,6 +68,57 @@ npx -y dsh-agent-shell install [--profile web]
 3. 面板：锁图标解锁 → 直接打字；AI：`shell_run` 发命令 → `shell_state` 看会话。
 4. 首次用工具会问你一次授权；之后正常使用。
 
+## 人机双接管（0.3.0）：AI 干一半人来接，人干一半 AI 来接
+
+AI 的终端就是普通 tmux 会话（挂在插件的**私有 socket** 上），你随时可以走进去；你自己在同一 socket 上开的终端，也能让 AI 接管。socket 名与会话 id 用 `shell_state` 查（`server: running (socket -L dsh-agent)` 那行）。
+
+**① 人接管 AI 的壳（AI 干一半 → 人接手）**
+
+```sh
+tmux -L dsh-agent list-sessions            # 看看都有哪些壳
+tmux -L dsh-agent attach -t dsh-ab12cd     # 直接走进去打字（就是普通 tmux）
+# 退出但让会话继续跑：Ctrl-b 然后按 d（detach）
+```
+
+你 attach 期间 AI 仍可读写（`shell_state` 里会显示 `⚠有人已attach`，AI 知情但不停工）。想让 AI **彻底放手**：让它执行
+`shell_manage action=release session=dsh-ab12cd` —— 之后 AI 的写操作一律被拒（读不受影响、闲置不回收、不出现在 AI 的 `mine` 里），现场完全归你。
+
+**② AI 接管人建的壳（人干一半 → AI 接手）**
+
+```sh
+tmux -L dsh-agent new-session -s mywork    # 关键：用插件的私有 socket（-L dsh-agent）
+```
+
+然后对 AI 说「接管 mywork」。AI 执行 `shell_manage action=claim session=mywork`：记归属、开始输出留痕（此前没有）、之后照常 `shell_run`/`shell_read` 驱动。干完想还给人：AI `release`，你再 attach 回去。
+（别人对话名下的壳，AI 不能随手 claim —— 需要你明确同意，AI 带 `override:true` 才行。）
+
+**③ 秘密不过 AI 手（vault，配合双域引用）**
+
+面板 ⚙ 菜单 →「秘密与宏」页签录入键值；或 CLI（人这一侧）：
+
+```sh
+dsh-agent-shell vault set sudo-pw '你的密码' --one-shot    # 一次性：注入成功即焚
+dsh-agent-shell vault list                                  # AI 也能 list（只见键名，永远不见值）
+```
+
+AI 端只写引用，例如过 sudo 密码提示：
+
+```json
+{ "session": "dsh-ab12cd", "steps": [
+  { "send": "sudo -S whoami", "expect": "match:[Pp]assword" },
+  { "send": "{{v:sudo-pw}}",  "expect": "idle" } ] }
+```
+
+值不进 AI 上下文、不进审计文本、不上工具输出（此后该会话读屏里这个值持续显示为 `[vault:{{v:sudo-pw}}]`）。**诚实边界**：`output/` 留痕是 tmux 原始字节流，值进过 pane 就在里面——vault 防的是 AI 与审计/显示面，不防本机磁盘（详见 SECURITY）。
+
+**④ 宏（可复用命令片段，人和 AI 都能写）**
+
+```sh
+dsh-agent-shell macros set deploy 'cd /srv/app && git pull && make restart'   # CLI
+```
+
+或在面板「秘密与宏」里写，或让 AI `shell_manage action=macro-set`。之后任何一方发 `{{m:deploy}}` 即展开执行；宏内容可嵌 `{{v:键}}`（发送时才展开，值不落脚本）。**所有宏写入全量进审计封链**——防止提示词注入把持久化命令偷渡进你的环境。
+
 ## 审计：哈希链 + 可选加锁
 
 - 默认 `~/.dsh/agent-shell/audit-YYYY-MM-DD.jsonl`（按天，保留期自动清理）；`output/` 是终端录像（原始字节，链上 `open` 记录带它的路径）。
@@ -76,6 +127,18 @@ npx -y dsh-agent-shell install [--profile web]
 - 详细用法与实现见 [docs/使用细节.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/使用细节.md)。
 
 ## 最近更新
+
+### 0.3.0 — 人机双接管 + 双域输入 + steps/expect + 闲置默认永久
+
+- **闲置自动关闭默认关（语义翻转）**：默认**永久保留**会话；不指定或 `-1`/`0` = 永不自动关，显式正数分钟才启用（`shell_open idleMinutes=N` / `shell_manage action=idle minutes=N`）；全局开关 `idleClose`（默认关）打开后只给"未指定时长"的会话兜底。
+- **人机双接管**：`shell_manage action=release`（AI 交还：写被拒、读不受影响、不回收）与 `action=claim`（AI 接管：人自建的壳记归属+开留痕；跨对话需 `override`）；`shell_state` 显示 `⚠有人已attach`。教程见上文[「人机双接管」](#人机双接管030ai-干一半人来接人干一半-ai-来接)。
+- **双域输入系统**：`{{v:键}}` vault 秘密域（人在面板/CLI 写；AI 只见键名——值不进审计、不上工具输出、oneShot 注入即焚、进过 pane 的值在该会话读屏里持续打码）+ `{{m:名}}` 宏域（人+AI 可写，**写入全量进审计封链**防注入偷渡；scope=global/conversation/shell；宏可嵌 `{{v:}}` 不可嵌宏）。两域物理隔离防键碰撞；多行内容走 `paste-buffer` 通道（不再逐行隐性 Enter）；护栏扫**展开后**文本但拒绝消息/审计只用原文。
+- **steps/expect（旗舰）**：`shell_run { steps:[{send, expect, timeout}] }` 一次调用跑完交互序列（等提示/等输出/等文件/等端口），中途不回传屏幕，失败才回现场并中止——交互式 TTY 的往返从 N 次压成 1 次。
+- **语义读屏**：`shell_read mode=summary`（cwd/git/前台/缓冲/最近结果+屏尾 3 行）、`mode=diff`（增量）、`ifChanged:true`（没变只回 `unchanged`，轮询省 token）、`search` 支持 `context=±N` 与 `offset` 分页游标。
+- **态势快照**：`shell_state` 每行带 `cwd=`，`withGit:true` 加 `git=分支`。
+- **错误码化**：护栏拒绝带稳定码 `[code=guard:rm-root]`（15 条规则全有 id，按码分支不猜文案）。
+- **control 指数退避**：tmux control 通道故障恢复 5s→10s→20s→40s→60s 封顶、成功即清零（旧版一刀切停 60s）。
+- **bench-runtime**：`scripts/bench-runtime.mjs` 对热路径做 p50/p95 + 红线核对（本机基线：/screen≈12ms、/list≈9ms、capture≈10ms、POST /keys≈2ms、summary≈11ms）。
 
 ### 0.2.3 — 自 0.2.2 之后
 

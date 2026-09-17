@@ -216,3 +216,46 @@ DSH 官方审批是 `@deepseek-ai/dsh-user-approval`（`ctx.approval`）＋ 工�
 
 回归测试真的执行了一次带恶意 socket 名的 `sh -c`，并断言注入标记文件**没有**被创建。
 
+### 10. 双域输入（vault/macros）的威胁模型（0.3.0）
+
+`{{v:键}}`（秘密）与 `{{m:名}}`（宏）把"凭据"和"可复用命令"引进了输入路径，边界必须说死：
+
+**vault 防什么（四个可见面）**
+
+| 面 | 机制 |
+|---|---|
+| AI 上下文 | AI 工具面**没有 vault 写入口**（只有 `vault-list`：键名/类型/次数）；引用展开发生在宿主 `expandForSend`，AI 拿到的所有返回（工具输出/审计导出/搜索/读屏）都经 `showText` —— 发送**前**登记的打码表把值替换成 `[vault:{{v:键}}]` |
+| 审计文本 | input 事件记的是**原文**（`echo {{v:pw}}`），展开后的值从不进 `recordAudit`；消耗只记 `decision:consume + 键名` |
+| 工具输出 | 同上打码表（会话级、上限 32 个值、会话关闭即清） |
+| 面板显示 | `/screen` 同样走 `showText`；面板「秘密与宏」列表**不回显值**（改值 = 重新录入） |
+
+**vault 不防什么（诚实边界）**
+
+- `output/` 留痕是 tmux `pipe-pane` 的**原始字节流**，在 JS 之外直写磁盘 —— 值进过 pane 就在
+  留痕文件里。vault 不是磁盘加密；要收紧就配合 `--audit-lock`（chattr +a，可检测不可改）与
+  整机磁盘加密，或对该会话接受"值在留痕里"的事实。
+- **远端机器**：ssh/sudo 场景里值最终进了对端进程（这是它的用途）；对端日志/历史文件不在本插件
+  边界内（例如远端 shell history 可能记下明文参数——用 `HISTCONTROL=ignorespace`、`sudo -S`
+  走 stdin 这类习惯配合）。
+- 同权限本机进程（含被注入的 AI 通过原生 bash 工具）可以直接读 `vault.json`（0600 只挡别的用户）。
+  vault 抬高的是"顺手泄露"的成本，不是权限边界。
+
+**oneShot 语义**：注入成功（`driver.send` 完成）才删键；发送失败不烧。同一条命令里重复引用
+同一个 oneShot 键 = 违规形状（想用两次再烧一次）→ 不烧并记 `consume-violation` 事件。
+
+**macros 防什么**
+
+- **prompt-injection 持久化**：宏是 AI 可写的持久化命令，被注入的模型可能偷渡后门 —— 所以
+  **写入全量进审计封链**（`event:macro` 带完整 text），面板默认展示全部宏（人能一眼看到环境里
+  持久化了什么），删除同样入链。
+- **宏藏危险命令**：护栏扫**展开后**文本（`guardOrRefuse` 的 scanText 通道），命中照常拦；
+  但拒绝消息与审计只用原文（展开文本可能含 vault 值，不外显）。
+- **放大与环**：宏不可嵌宏/裸键（只展开一层），展开上限 16KB；裸键 `{{x}}` 要求两域全局唯一，
+  碰撞即拒（两域物理隔离：两个文件、两套前缀，键空间不共享）。
+
+**多行 paste 通道**：宏展开出多行时走 `load-buffer + paste-buffer -p + delete-buffer`（临时文件
+0600、用后即删、缓冲区名按会话隔离）。注意：不支持 bracketed-paste 的 TUI 会把整块当逐行输入。
+
+**归属与接管**：`claim` 别人对话名下的会话默认拒绝（需 `override:true` + 用户明确同意）；
+`release` 后 AI 写路径全拒（sendKeys/shell_run/runSteps 三处同闸门），读不受影响。
+

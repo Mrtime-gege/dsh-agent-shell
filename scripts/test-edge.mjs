@@ -1167,21 +1167,26 @@ const idOf = async (label, callFn) => {
   })
   // 先开一个 shell：dryrun 的 "mine" 与闲置展示都需要它
   const openedIdle = await hSand.run('shell_open', { name: 'idle-demo', idleMinutes: 7 })
-  check(String(openedIdle).includes('idle 7m'), `shell_open 创建时定死闲置时长：${String(openedIdle).split('\n')[0]}`)
+  check(String(openedIdle).includes('idle=7m'), `shell_open 显式定闲置时长：${String(openedIdle).split('\n')[0]}`)
   const idleId = (String(openedIdle).match(/session (\S+)/) ?? [])[1]
   // dryrun：危险命令只预演不发送（吸收 shell_check）
   const dryBlocked = await hSand.run('shell_run', { session: 'mine', command: 'rm -rf /', dryrun: true })
   check(String(dryBlocked).includes('nothing would be sent'),
     `dryrun 危险命令 → REFUSED 且未发送（${String(dryBlocked).slice(0, 70)}）`)
   const dryOk = await hSand.run('shell_run', { session: 'mine', command: 'echo ok', dryrun: true })
-  check(String(dryOk).includes('allowed'), `dryrun 普通命令 → allowed（${String(dryOk).slice(0, 50)}）`)
-  // 闲置：创建时定值（idleMinutes=7）→ shell_state 可见；shell_manage idle 可改 0（永不关）
+  check(String(dryOk).includes('allowed'), `dryrun 普通命令 → allowed（${String(dryOk).split('\n')[0].slice(0, 50)}）`)
+  check(String(dryBlocked).includes('code=guard:rm-root'), '0.3.0 错误码化：守卫拒绝带稳定码 guard:rm-root')
+  // 闲置：创建时定值（idleMinutes=7）→ shell_state 可见；manage idle 改 0/-1 = 显式豁免
   const st = await hSand.run('shell_state', {})
   check(String(st).includes(`idle=7m`), 'shell_state 每会话显示 idle=7m（统一分钟单位）')
   const changed = await hSand.run('shell_manage', { action: 'idle', session: idleId, minutes: 0 })
-  check(String(changed).includes('idle auto-close = 0 分钟'), `shell_manage idle 改成 0（永不关）：${String(changed).trim()}`)
+  check(String(changed).includes('永不自动关闭'), `shell_manage idle 改成 0（显式豁免）：${String(changed).trim()}`)
   const st2 = await hSand.run('shell_state', {})
-  check(String(st2).includes('idle=0(off)'), 'shell_state 反映 idle=0(off)')
+  check(String(st2).includes('idle=0(永不)'), 'shell_state 反映 idle=0(永不)')
+  // 0.3.0：总开关开着时，未指定时长的会话吃全局兜底（本 harness 配置 idleClose=true, 42m）
+  const follow = await hSand.run('shell_open', { name: 'idle-follow' })
+  check(String(follow).includes('idle=全局42m'), `未指定 → 跟随全局兜底：${String(follow).split('\n')[0]}`)
+  await hSand.run('shell_manage', { action: 'close', session: (String(follow).match(/session (\S+)/) ?? [])[1] })
   await hSand.run('shell_manage', { action: 'close', session: idleId })
   hSand.cleanup()
 }
@@ -1195,7 +1200,7 @@ const idOf = async (label, callFn) => {
   })
   const openedFeat = await hFeat.run('shell_open', { name: 'feat', cwd: '/tmp', cols: 80, rows: 24 })
   const featId = (String(openedFeat).match(/session (\S+)/) ?? [])[1]
-  check(String(openedFeat).includes('idle 60m'), `open 输出带 idle 标注：${String(openedFeat).split('\n')[0]}`)
+  check(String(openedFeat).includes('idle=永久(未指定)'), `0.3.0 open 输出带 idle 标注（默认永久）：${String(openedFeat).split('\n')[0]}`)
 
   // A：结构化退出码。注意顺序：先跑"未包装"（ssh -h），否则滚动缓冲里残留的
   // 退出码标记会干扰"无标记"断言；parseExitFromTail 取最后一条，所以真/假命令
@@ -1459,6 +1464,46 @@ const idOf = async (label, callFn) => {
   const freshHit = await run('shell_read', { session: auditId, until: 'match:FRESH_MARK_888', timeout: 8000 }, EXEC)
   check(String(freshHit).includes('reached'),
     `match 命中等待后新出现的输出（${String(freshHit).slice(0, 70)}）`)
+
+  // ── 0.3.0 双域系统：vault 值不上屏不入账、oneShot 用后即焚；宏入封链；守卫扫展开后 ──
+  writeFileSync(join(auditDir, 'vault.json'), JSON.stringify({
+    pw: { value: 'Sup3rSecret-XYZ-9', oneShot: true },
+  }), { mode: 0o600 })
+  const vMark = readLines().length
+  const vRun = await run('shell_run', { session: auditId, command: 'echo {{v:pw}}' }, EXEC)
+  check(!String(vRun).includes('Sup3rSecret-XYZ-9') && String(vRun).includes('[vault:{{v:pw}}]'),
+    'vault 值不上屏：工具输出里被替换成 [vault:{{v:pw}}]')
+  await settle()
+  const vLines = readLines().slice(vMark)
+  check(!vLines.some((r) => JSON.stringify(r).includes('Sup3rSecret-XYZ-9')),
+    'vault 值不进审计（整段 JSONL 无该字面量）')
+  check(vLines.some((r) => r.event === 'input' && String(r.text ?? '').includes('{{v:pw}}')),
+    '审计记的是引用形态（谁用了哪个键，可查）')
+  check(vLines.some((r) => r.event === 'vault' && r.decision === 'consume'),
+    'oneShot 用后即焚（consume 事件入链）')
+  const vList = await run('shell_manage', { action: 'vault-list' }, EXEC)
+  check(!vList.includes('{{v:pw}}'), '烧掉后 vault-list 不再有该键')
+  const mMark = readLines().length
+  await run('shell_manage', { action: 'macro-set', name: 'edge-m1', text: 'echo EDGE-MACRO-1', scope: 'global' }, EXEC)
+  await settle()
+  check(readLines().slice(mMark).some((r) => r.event === 'macro' && r.key === 'edge-m1' && String(r.text ?? '').includes('echo EDGE-MACRO-1')),
+    '宏写入全量进封链（防 prompt-injection 偷渡持久化命令）')
+  const mRun = await run('shell_run', { session: auditId, command: '{{m:edge-m1}}' }, EXEC)
+  check(String(mRun).includes('EDGE-MACRO-1'), '宏展开发送')
+  await run('shell_manage', { action: 'macro-set', name: 'edge-bad', text: 'rm -rf /', scope: 'global' }, EXEC)
+  const badRun = await run('shell_run', { session: auditId, command: '{{m:edge-bad}}' }, EXEC)
+  check(String(badRun).includes('REFUSED') && !String(badRun).includes('rm -rf /'),
+    '守卫扫**展开后**文本（宏藏危险命令照样拦），且命中不外显展开内容')
+  await run('shell_manage', { action: 'macro-rm', name: 'edge-m1' }, EXEC)
+  await run('shell_manage', { action: 'macro-rm', name: 'edge-bad' }, EXEC)
+  // 人用原生 tmux（同一 socket）自建的会话 → AI claim 接管后可驱动
+  spawnSync('tmux', ['-L', SOCKET, 'new-session', '-d', '-s', 'human-made', 'bash'], { stdio: 'ignore' })
+  await new Promise((r) => setTimeout(r, 400))
+  const claimOut = await run('shell_manage', { action: 'claim', session: 'human-made' }, EXEC)
+  check(String(claimOut).includes('已接管'), `claim 人自建的壳：${String(claimOut).split('\n')[0]}`)
+  const humanRun = await run('shell_run', { session: 'human-made', command: 'echo HUMAN-CLAIM-OK' }, EXEC)
+  check(String(humanRun).includes('HUMAN-CLAIM-OK'), 'claim 后 AI 可驱动该壳（人干一半 AI 接管）')
+  await run('shell_manage', { action: 'close', session: 'human-made' }, EXEC)
 
   const lines = readLines().slice(mark)
   const openRec = lines.find((r) => r.event === 'open' && r.shell === auditId)

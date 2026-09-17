@@ -94,6 +94,40 @@ from 0.2.2).
 
 ## Recent changes
 
+### 0.3.0 — human⇄AI handover + vault/macros + steps/expect + sessions permanent by default
+
+- **Idle auto-close is OFF by default now**: sessions are **permanent** unless you opt in — omitted
+  or `-1`/`0` = never close; an explicit positive `idleMinutes` enables per-session reaping; the
+  global `idleClose` switch (default off) only backstops sessions without an explicit value.
+- **Human⇄AI handover**: `shell_manage action=release` (AI hands the shell back — its writes are
+  refused, reads still work, sweeper won't touch it; the reply includes the exact
+  `tmux -L <socket> attach -t <id>` command for the human) and `action=claim` (AI adopts a shell a
+  human created on the same private socket — records ownership + starts output capture; claiming
+  another conversation's shell needs explicit `override`). `shell_state` shows `⚠attached` and
+  `[released]` markers. See the handover tutorial in the Chinese README (§ 人机双接管).
+- **Dual-domain input (vault + macros)**: `{{v:key}}` secrets (human-entered via panel/CLI; the AI
+  only ever sees key names — values never enter audit text or tool output, one-shot keys burn after
+  a successful injection, and once a value has crossed the pane it stays masked as
+  `[vault:{{v:key}}]` in that session's reads) and `{{m:name}}` macros (human+AI writable, **every
+  write goes into the hash-chained audit** against prompt-injection smuggling; macros may embed
+  `{{v:}}` but never other macros; multiline content rides a bracketed paste-buffer channel).
+  The guard scans **expanded** text (a macro hiding `rm -rf /` is still refused) while refusals and
+  audit only ever show the original. Honest boundary: `output/` capture is raw bytes — vault
+  protects the AI/audit/display planes, **not local disk** (see SECURITY §10).
+- **steps/expect (flagship)**: `shell_run { steps:[{send?, expect?, timeout?}] }` runs a whole
+  interactive sequence in ONE call — mid-flight screens stay out of context; any timeout/guard
+  refusal returns the scene and aborts. Interactive TTY round-trips collapse from N calls to 1.
+- **Semantic reads**: `shell_read mode=summary` (cwd/git/fg/buffer/last-result + 3 tail lines),
+  `mode=diff`, `ifChanged:true` (unchanged → one word), `search` gains `context`/`offset`.
+- **Situation snapshot**: every `shell_state` row now carries `cwd=`; `withGit:true` adds branches.
+- **Error codes**: guard refusals carry stable codes (`[code=guard:rm-root]`).
+- **Control-channel exponential backoff** (5s→60s cap, reset on success) replaces the flat 60s freeze.
+- **Audit chain latent bug fixed**: `canonicalize` treated `undefined` fields as `null` while
+  `JSON.stringify` drops them → any record with an undefined field broke verification from that
+  record on ("broken at #4" in tests). Canonicalization now matches serialization; regression-locked.
+- **bench-runtime**: p50/p95 harness for hot paths with red lines (baseline: /screen≈12ms,
+  /list≈9ms, capture≈10ms, POST /keys≈2.4ms).
+
 ### 0.2.3 — since 0.2.2
 
 - **Tool surface slimmed 10 → 7**: `shell_wait` folded into `shell_read` (new `until` wait mode:

@@ -2,9 +2,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  NAME_PREFIX, DANGEROUS, scanDanger, sanitizeName, clamp, parseTmuxVersion, idleClosable,
+  NAME_PREFIX, DANGEROUS, scanDanger, dangerCode, sanitizeName, clamp, parseTmuxVersion, idleClosable,
   shouldWrapExit, wrapExitCommand, parseExitFromTail, diffSince, stripCommandEcho, redactSecrets,
   parseWaitFor, summarizeFailure, doctorAdvice,
+  extractRefs, applyRefs, macroVisible, macroSubmitWantsEnter, vaultConsumeNow, REF_KEY_RE,
 } from '../lib/pure.mjs'
 // tmux.js 零 DSH 依赖（只引 node:fs/promises 与 node:child_process）—— 纯逻辑可离线测
 import { drillForeground, normalizeReply, readDescendantProcs } from '../lib/tmux.js'
@@ -45,6 +46,12 @@ pass(scanDanger('unset TMUX; tmux attach -t nest') === null, '嵌套 tmux 的正
 pass(scanDanger('echo hello', []) === null, '空规则表 → 放行')
 pass(scanDanger('x', [{ pattern: /x/, reason: 'r' }]) === 'r', '自定义规则生效')
 pass(scanDanger('', ) === null, '空文本放行')
+
+/* ── dangerCode：错误码化（0.3.0，调用方按稳定码分支而不是按文案猜） ────────── */
+pass(dangerCode('filesystem format') === 'guard:mkfs', 'mkfs 理由 → guard:mkfs 稳定码')
+pass(dangerCode(scanDanger('rm -rf /')) === 'guard:rm-root', '从命中结果反查码（rm -rf / → guard:rm-root）')
+pass(dangerCode('没这条规则') === 'guard:unknown', '查不到的理由 → guard:unknown（不抛错）')
+pass(DANGEROUS.every((r) => typeof r.id === 'string' && r.id.length > 0), '每条规则都有 id（错误码不能漏）')
 
 /* ── DANGEROUS 数量锚定（加规则必须显式更新这里，防静默增删）────────────── */
 pass(DANGEROUS.length === 15, `危险规则数稳定（${DANGEROUS.length}）—— 增删需同步 SECURITY.md 与测试`)
@@ -100,6 +107,14 @@ pass(verifyChain([s1, s2]).ok === true, '完整链校验通过')
 pass(verifyChain([s1, s2]).sealed === 2, '封链计数正确')
 pass(verifyChain([s1, { ...s2, text: 'y' }]).ok === false, '中间篡改 → 断链')
 pass(verifyChain([s1, s2]).brokenAt === null, '完整链无断点')
+// 0.3.0 回归锁：undefined 字段在**写入方**（记录里带键）与**校验方**（落盘 JSON 丢键后 parse 回来）
+// 必须得到同一摘要 —— 否则链从该条起全部失验（实测踩中：open 带 idleMinutes:undefined "断链于第 4 条"）
+const sUndef = sealRecord(s1.hash, { ts: 3, event: 'open', shell: 'dsh-u', idleMinutes: undefined })
+const roundTripped = JSON.parse(JSON.stringify(sUndef))   // 模拟落盘 → 读回
+pass(hashRecord(roundTripped.prevHash, roundTripped) === sUndef.hash,
+  '含 undefined 字段的记录：落盘往返后摘要一致（canonicalize 与 JSON.stringify 同口径）')
+pass(verifyChain([s1, roundTripped]).ok === true, 'undefined 字段记录落盘读回后链仍完整')
+pass(canonicalize({ a: 1, b: undefined }) === '{"a":1}', 'canonicalize 丢弃 undefined 键（不是变 null）')
 const legacyRec = { ts: 0, event: 'open', shell: 'old' }
 // 0.2.2 起不向前兼容：未封链记录直接判断链（unsealed），不再容忍
 const strict = verifyChain([legacyRec, s1, s2])
@@ -175,9 +190,19 @@ import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } fro
     '会话级短的时长覆盖默认（5 分钟 → 6 分钟已到期）')
   pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 5 } }), { now: T0 + 4 * 60000 }).length === 0,
     '会话级短的时长未到期不闭')
-  // 默认值兜底
-  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0 } }), { now: T0 + 65 * 60000, defaultMinutes: 60 }).length === 1,
-    '无会话级时长 → 用默认 60 分钟')
+  // 默认值兜底（0.3.0 语义翻转：总开关默认关，兜底必须显式开）
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0 } }), { now: T0 + 65 * 60000, defaultMinutes: 60, globalEnabled: true }).length === 1,
+    '总开关开 + 无会话级时长 → 吃默认 60 分钟兜底')
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0 } }), { now: T0 + 86400_000, globalEnabled: false }).length === 0,
+    '0.3.0 默认：未指定时长 + 总开关关 → 永久保留（不扫）')
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: -1 } }), { now: T0 + 86400_000, globalEnabled: true }).length === 0,
+    '0.3.0：-1（及任何负数）= 本会话显式豁免，总开关开着也永不')
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 10 } }), { now: T0 + 11 * 60000, globalEnabled: false }).length === 1,
+    '0.3.0：全局关着，显式正值的会话照样按自己的时长到期')
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 30 } }), { now: T0 + 6 * 60000, globalEnabled: true, defaultMinutes: 5 }).length === 0,
+    '显式会话级时长优先于全局兜底（30m 会话不因 5m 兜底在 6 分钟被误关）')
+  pass(idleClosable([mkSession('a')], owners({ a: { lastUsedAt: T0, idleMinutes: 30 } }), { now: T0 + 31 * 60000, globalEnabled: true, defaultMinutes: 5 }).length === 1,
+    '同一会话按**自己的** 30 分钟到期（优先级的正面一半）')
   // skip：人在操作的会话不扫
   pass(idleClosable([mkSession('a')], owners(), { now: T0 + 3600_000, skip: new Set(['a']) }).length === 0,
     'skip 集合里的会话不扫（面板解锁/手动豁免）')
@@ -374,6 +399,62 @@ import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } fro
     '超过闲置时长 → 提示即将被自动关闭')
   pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 10, userBusy: true })[0].includes('人在操作'),
     '人在操作 → 说明 AI 写操作会让路')
+}
+
+/* ── 0.3.0 双域引用：extractRefs / applyRefs / macroVisible / submit / oneShot ── */
+
+{
+  const refs = extractRefs('ssh {{m:bastion}} -p {{v:port}} 还有裸 {{only}} 与非法 {{a b}}')
+  pass(refs.length === 3 && refs[0].domain === 'm' && refs[0].key === 'bastion'
+    && refs[1].domain === 'v' && refs[1].key === 'port'
+    && refs[2].domain === null && refs[2].key === 'only',
+    `引用词法：显式 v/m 与裸键都认，非法形状 {{a b}} 不认（实得 ${refs.length} 个）`)
+  pass(extractRefs('没有引用').length === 0, '无引用文本 → 空数组')
+
+  const vault = { psd: { value: 'S3cret!', oneShot: true }, port: { value: '2222' } }
+  const macros = {
+    bastion: { text: 'ssh jump@10.0.0.1 -p {{v:port}}', scope: 'global' },
+    mine: { text: 'echo hi', scope: 'conversation', owner: 'conv-A' },
+    shellOnly: { text: 'uptime', scope: 'shell', session: 'dsh-abc123' },
+  }
+  const ok = applyRefs('sudo -S <<< {{v:psd}}', vault, macros, 'conv-A', 'dsh-abc123')
+  pass(ok.ok === true && ok.text === 'sudo -S <<< S3cret!' && ok.usedVault.join(',') === 'psd',
+    'vault 引用展开 + usedVault 记账（oneShot 消费由调用方在发送成功后做）')
+  const nested = applyRefs('{{m:bastion}}', vault, macros, 'conv-A', 'dsh-abc123')
+  pass(nested.ok === true && nested.text === 'ssh jump@10.0.0.1 -p 2222' && nested.usedVault.join(',') === 'port',
+    '宏里嵌 {{v:}} → 第二趟展开（闭环：ssh {{m:bastion}} 自动带上端口秘密）')
+  const bare = applyRefs('{{psd}}', vault, macros, 'conv-A', 'dsh-abc123')
+  pass(bare.ok === true && bare.text === 'S3cret!', '裸键唯一命中 vault → 直接展开')
+  const collide = applyRefs('{{dup}}', { dup: { value: 'v' } }, { dup: { text: 'm' } }, 'conv-A', 'dsh-x')
+  pass(collide.ok === false && collide.error.includes('碰撞'), '裸键两域碰撞 → 拒绝并要求显式前缀（键碰撞攻击防线）')
+  const missing = applyRefs('{{v:nope}}', vault, macros, 'conv-A', 'dsh-x')
+  pass(missing.ok === false && missing.error.includes('nope'), '缺键 → 结构化错误（绝不把字面 {{…}} 发进终端）')
+  const wrongScope = applyRefs('{{m:mine}}', vault, macros, 'conv-B', 'dsh-x')
+  pass(wrongScope.ok === false && wrongScope.error.includes('可见域'), 'conversation 域宏对别的对话不可见')
+  const wrongShell = applyRefs('{{m:shellOnly}}', vault, macros, 'conv-A', 'dsh-other')
+  pass(wrongShell.ok === false, 'shell 域宏只能在指定终端用')
+  const loopMacros = { a: { text: '{{m:b}}', scope: 'global' }, b: { text: 'x', scope: 'global' } }
+  const looped = applyRefs('{{m:a}}', vault, loopMacros, 'conv-A', 'dsh-x')
+  pass(looped.ok === false && looped.error.includes('一层'), '宏嵌宏 → 拒绝（只展开一层，防环防放大）')
+  const big = applyRefs('{{v:psd}}', { psd: { value: 'x'.repeat(17000) } }, {}, 'conv-A', 'dsh-x')
+  pass(big.ok === false && big.error.includes('16KB'), '展开后超 16KB → 拒绝')
+
+  pass(macroVisible({ scope: 'global' }, 'anyone', 'any') === true, 'global 宏人人可见')
+  pass(macroVisible({ scope: 'conversation', owner: 'A' }, 'A', 'x') === true
+    && macroVisible({ scope: 'conversation', owner: 'A' }, 'B', 'x') === false, 'conversation 域按归属')
+  pass(macroVisible({ scope: 'shell', session: 'dsh-1' }, 'A', 'dsh-1') === true
+    && macroVisible({ scope: 'shell', session: 'dsh-1' }, 'A', 'dsh-2') === false, 'shell 域按终端')
+
+  pass(macroSubmitWantsEnter('echo hi') === true, '单行宏 → 要 Enter')
+  pass(macroSubmitWantsEnter('line1\nline2') === true, '多行宏尾部有未提交行 → 要 Enter')
+  pass(macroSubmitWantsEnter('line1\nline2\n') === false, '多行宏自己以换行结尾 → 别再补 Enter（防空提交）')
+
+  pass(vaultConsumeNow({ entry: { oneShot: true }, repeat: 1 }).consume === true, 'oneShot 单次引用 → 用后即焚')
+  const twice = vaultConsumeNow({ entry: { oneShot: true }, repeat: 2 })
+  pass(twice.consume === false && twice.violation === true, 'oneShot 同条命令重复引用 → 不烧 + 记违规（防绕过一次性）')
+  pass(vaultConsumeNow({ entry: {}, repeat: 1 }).usesBump === true, '非 oneShot → 只计数不烧')
+  pass(vaultConsumeNow({ entry: undefined, repeat: 1 }).consume === false, '键不存在 → 安全空操作')
+  pass(REF_KEY_RE.test('a.b_c-1') && !REF_KEY_RE.test('a b') && !REF_KEY_RE.test('a;b'), '引用键白名单（分号/空格进不了文件名与 tmux 目标）')
 }
 
 console.log(failed === 0 ? `pure 纯函数：全部通过（${checked} 项断言）` : `pure 纯函数：${failed}/${checked} 项失败`)

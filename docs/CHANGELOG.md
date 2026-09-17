@@ -2,6 +2,71 @@
 
 本文件记录 `dsh-agent-shell` 的版本变化。
 
+## 0.3.0（2026-09-17）— 人机双接管 + 双域输入（vault/macros）+ steps/expect + 闲置默认永久
+
+- **闲置自动关闭默认关（语义翻转，维护者拍板）**：默认**永久保留**会话——不指定或 `-1`/`0` =
+  永不自动关；显式正数分钟才启用（`shell_open idleMinutes=N` / `shell_manage action=idle minutes=N`）。
+  全局开关 `idleClose` 默认 false，打开后只给"未指定时长"的会话兜底 `idleCloseMinutes`。
+  `pure.idleClosable` 加 `globalEnabled`；`resolveConfig` 的代码级默认同步翻转（`!== false` → `=== true`，
+  实测两处默认源不一致会让 schema 默认失效）；扫描器在"全局关且无显式正值会话"时连 `driver.list`
+  都省掉。展示统一走 `idleLabel`（open/state/doctor 三处同一措辞）。
+- **人机双接管（claim/release + 原生 tmux 直连教程）**：
+  - `shell_manage action=release`：AI 交还——写操作一律被拒（`releasedRefusal` 闸门挂在 sendKeys/
+    shell_run/runSteps 三条写路径），读不受影响，`mine` 不再带出它，闲置扫描不碰它；返回文案直接给
+    人的接管命令 `tmux -L <socket> attach -t <id>`。
+  - `shell_manage action=claim`：AI 接管——人用原生 tmux 在同一私有 socket 上自建的会话（无归属条目）
+    可被认领：记归属 + 开始输出留痕；面板侧会话可收回；**别人对话名下的会话默认拒绝**，需用户明确
+    同意后 `override:true`。released 的会话 claim 即收回。
+  - `shell_state` 每行新增 `⚠有人已attach`（观察不拒绝）与 `[已交还用户]` 标记；审计新事件 `claim`。
+  - README 新章节「人机双接管」：attach 直连 / 人建壳 AI 接管 / vault 过密码 / 宏四段教程。
+- **双域输入系统（vault 秘密域 + macros 宏域）**：
+  - 引用语法 `{{v:键}}` / `{{m:名}}` / 裸 `{{键}}`（裸键要求两域全局唯一，碰撞即拒——两域物理隔离，
+    两个文件两套前缀，键空间不共享）；`pure.extractRefs/applyRefs/macroVisible` 全可单测。
+  - **vault（人写）**：面板「秘密与宏」页签或 CLI `dsh-agent-shell vault set/list/rm` 录入；
+    AI 工具面**没有写入口**，只有 `vault-list`（键名/类型/oneShot/用过次数，永不见值）。
+    值不进审计文本（审计记 `{{v:键}}` 原文）、不上工具输出（发送**前**同步登记打码表，
+    值进过 pane 后该会话读屏持续替换为 `[vault:{{v:键}}]`）；`oneShot` 注入成功即焚
+    （`pure.vaultConsumeNow`：同条命令重复引用 = 违规计数不烧，防绕过一次性）；消耗事件入链。
+  - **macros（人+AI 可写）**：`shell_manage action=macro-set/rm/list` + 面板 + CLI；
+    scope=global/conversation/shell（复用 owners 归属）；**写入全量进审计封链**（防 prompt-injection
+    偷渡持久化命令）；宏可嵌 `{{v:}}`（第二趟展开），不可嵌宏/裸键（只展开一层，防环防放大）；
+    `submit:false` = 只填不提交；多行内容自动走 `load-buffer + paste-buffer -p + delete-buffer`
+    通道（临时文件 0600 即删）——修掉"多行文本里每个 `\n` 都是隐性 Enter"的危险默认。
+  - 展开统一在 `expandForSend`（sendKeys/shell_run/runSteps 三入口共用）；**护栏扫展开后文本**
+    （宏里藏 `rm -rf /` 照样拦）但拒绝消息与审计只用原文（展开内容可能含秘密，不外显）；
+    展开失败 = REFUSED，字面 `{{…}}` 永不进终端。
+  - 诚实边界（SECURITY 新增威胁模型节）：`output/` 留痕是 tmux 原始字节流，vault 防的是
+    AI 上下文/审计文本/工具输出/面板显示四个可见面，**不防本机磁盘文件**。
+- **steps/expect（旗舰）**：`shell_run { steps:[{send?, expect?, timeout?}] }` 一次调用按序执行
+  send→等 expect→下一步；中途不回传屏幕（成功每步一行摘要），任一步超时/护栏拒绝/让位于人
+  立即回传现场（尾 12 行）并中止。expect 复用 waitFor 全家（`match:` 剥回显、`file:`、`port:`）+
+  缺省 `idle`；每步默认 15s。交互式 TTY（菜单/确认/密码提示/TUI）往返从 N 次工具调用压成 1 次。
+- **语义读屏**：`shell_read mode=summary`（cwd/git 分支/前台/attached/缓冲/最近结果 + 屏尾 3 行，
+  几十 token 替代整屏）；`mode=diff`（=since 别名）；`ifChanged:true`（画面没变只回 `unchanged`，
+  轮询长任务的省 token 姿势；首次读取无基线按"有变化"处理）；`search` 新增 `context`（命中行 ±N，
+  `>` 标命中）与 `offset`（分页游标，输出提示下一个 offset）。
+- **态势快照**：tmux `LIST_FORMAT` 新增 `#{pane_current_path}`（零额外 spawn），`/list` 与
+  `shell_state` 每行带 `cwd=`；`withGit:true` 时每会话跑一次 `git branch --show-current`（opt-in）。
+- **错误码化**：15 条护栏规则全部带稳定 id，拒绝消息附 `[code=guard:rm-root]`（`pure.dangerCode`
+  反查），调用方按码分支不再猜文案。
+- **control 指数退避**：`markControlDown` 从一刀切 60s 改为 5s→10s→20s→40s→60s 封顶、任一成功
+  即清零（`noteControlOk`）——瞬时抖动不再把快路径掐一分钟。
+- **审计链潜伏 bug 修复（实测踩出）**：`canonicalize/stableValue` 把 `undefined` 字段归一成
+  `null` 参与哈希，但落盘 `JSON.stringify` 直接丢键 → 校验方 parse 回来少一个键，摘要必然失配、
+  链从该条起全部判"篡改"。0.3.0 的 `idleMinutes:undefined`（默认永久）第一次触发（"断链于第 4 条"）。
+  修复：规范化与序列化同口径（undefined 键丢弃）；纯函数回归锁 3 条。
+- **bench-runtime（M0 性能防线）**：`scripts/bench-runtime.mjs` 对打包产物+真 tmux 采 p50/p95：
+  open/run/send(settle150)/summary/capture(control 通断两态)/GET screen/GET list/POST keys，
+  带红线核对（面板轮询面严红线、工具往返含刻意渲染 settle 放宽）。本机基线：/screen≈12ms、
+  /list≈9ms、capture≈10ms、POST /keys≈2.4ms、summary≈11ms、run echo≈443ms（其中 ~400ms 是
+  回车后渲染等待的刻意设计）。
+- **面板**：⚙ 菜单新增第三页签「秘密与宏」（vault 录入/删除/列表【值不回显，改值=重录】；
+  宏编辑/删除/列表），复用授权浮层的卡片体系零新增 CSS；6 条新 HTTP 路由全部走同源 JSON 闸门。
+- **测试**：pure 160→**194**（idleClosable 新语义、dangerCode、双域 17、链回归 3 等）；
+  smoke +13（steps 正反/护栏、summary、ifChanged、search context、宏展开、缺失引用拒绝、
+  release 拒写、claim 收回、路由数 20）；edge +13（vault 值不上屏/不入账/oneShot 焚、宏入链、
+  守卫扫展开、人建壳 claim、闲置新语义、错误码）。
+
 ## 0.2.3（2026-09-17）— 闲置自动关闭 + 参数直达 AI + 工具精简 10→7 + AI 精准四件套 + 面板重做 + 审计链加固 + 启动性能
 
 - **工具精简 10 → 7**（用户要求"工具数量有点多"）：
