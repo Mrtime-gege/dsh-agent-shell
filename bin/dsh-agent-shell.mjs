@@ -233,7 +233,7 @@ async function verifyAudit () {
   process.exit(v.ok ? 0 : 1)
 }
 
-/* ── 0.3.0 vault / macros：人这一侧的录入通道（面板「秘密与宏」的 CLI 等价物）──────
+/* ── 0.3.0 vault / macros：人这一侧的录入通道（面板「引用库」的 CLI 等价物）──────
  * vault 只有人与面板能写 —— AI 的工具面没有写入口，只能 {{v:键名}} 引用。
  * 用法：
  *   dsh-agent-shell vault list

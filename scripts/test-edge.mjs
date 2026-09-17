@@ -1310,7 +1310,24 @@ const idOf = async (label, callFn) => {
   hAi.cleanup()
 }
 
-/* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── *//* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */
+/* ── 7.94e 0.3.1 稳定性：4 壳并发 open 不丢归属表条目（writeOwners 乱序覆盖丢条目已修）── */
+{
+  const raceDir = join(tmpdir(), `dsh-edge-race-${Date.now()}`)
+  const hRace = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-race`,
+    config: { watchdog: false, auditDir: raceDir, __actor: 'race-session' },
+  })
+  const openedAll = await Promise.all(['ra', 'rb', 'rc', 'rd'].map((n) => hRace.run('shell_open', { name: n })))
+  const raceIds = openedAll.map((r) => String(r).match(/session (\S+)/)[1])
+  await new Promise((r) => setTimeout(r, 800))
+  const raceOwners = JSON.parse(readFileSync(join(raceDir, 'sessions.json'), 'utf8'))
+  const missing = raceIds.filter((id) => raceOwners[id] === undefined)
+  check(missing.length === 0, `并发开 4 壳归属表全落盘（缺失：${missing.join(',') || '无'}）`)
+  for (const id of raceIds) await hRace.run('shell_manage', { action: 'close', session: id })
+  hRace.cleanup()
+}
+
+/* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */
 
 {
   // 用**全新** harness：主 harness 在更早的小节里已经授权过，那不是"第一次"
@@ -1470,9 +1487,28 @@ const idOf = async (label, callFn) => {
     pw: { value: 'Sup3rSecret-XYZ-9', oneShot: true },
   }), { mode: 0o600 })
   const vMark = readLines().length
-  const vRun = await run('shell_run', { session: auditId, command: 'echo {{v:pw}}' }, EXEC)
-  check(!String(vRun).includes('Sup3rSecret-XYZ-9') && String(vRun).includes('[vault:{{v:pw}}]'),
-    'vault 值不上屏：工具输出里被替换成 [vault:{{v:pw}}]')
+  // ── 0.3.1 AI 侧裸引用规则：命令行里直接引用 vault 一律拒绝（转换外泄防线，实测 base64 可破打码）
+  const vInline = await run('shell_run', { session: auditId, command: 'echo {{v:pw}}' }, EXEC)
+  check(String(vInline).includes('REFUSED') && String(vInline).includes('整条裸引用'),
+    'AI 把 {{v:}} 写进命令行 → 整条拒绝（echo/管道/夹心形态禁止）')
+  check((await run('shell_manage', { action: 'vault-list' }, EXEC)).includes('{{v:pw}}'),
+    '被拒不落刀：拒绝后键保留')
+  // 唯一合法形态：steps 把值喂进 stdin 提示（read 不带 -s 会回显 → 顺带验证尾锚定遮蔽）
+  const vRun = await run('shell_run', { session: auditId, steps: [
+    { send: "read -p 'p> ' v1", expect: 'match:p>', timeout: 5000 },
+    { send: '{{v:pw}}', expect: 'idle', timeout: 5000 },
+  ] }, EXEC)
+  check(String(vRun).includes('全部 2 步通过'), 'steps 裸注入成功（AI 侧唯一允许形态）')
+  // 0.3.0.1 回归锁：history/screen/summary/since 四个读屏出口曾绕过 showText 打码层（真漏过值）
+  const vHist = await run('shell_read', { session: auditId, mode: 'history', lines: 80 }, EXEC)
+  check(!String(vHist).includes('Sup3rSecret-XYZ-9') && String(vHist).includes('[vault:{{v:pw}}]'),
+    'vault 值不从 history 出口漏（p> 回显行被尾锚定遮蔽）')
+  const vScreen = await run('shell_read', { session: auditId, mode: 'screen' }, EXEC)
+  check(!String(vScreen).includes('Sup3rSecret-XYZ-9'), 'vault 值不从 screen 出口漏')
+  const vSum = await run('shell_read', { session: auditId, mode: 'summary' }, EXEC)
+  check(!String(vSum).includes('Sup3rSecret-XYZ-9'), 'vault 值不从 summary 出口漏')
+  const vSince = await run('shell_read', { session: auditId, mode: 'since' }, EXEC)
+  check(!String(vSince).includes('Sup3rSecret-XYZ-9'), 'vault 值不从 since/diff 出口漏')
   await settle()
   const vLines = readLines().slice(vMark)
   check(!vLines.some((r) => JSON.stringify(r).includes('Sup3rSecret-XYZ-9')),
@@ -1483,6 +1519,30 @@ const idOf = async (label, callFn) => {
     'oneShot 用后即焚（consume 事件入链）')
   const vList = await run('shell_manage', { action: 'vault-list' }, EXEC)
   check(!vList.includes('{{v:pw}}'), '烧掉后 vault-list 不再有该键')
+  // ── 0.3.1 防绕过：oneShot 重复引用在展开层整条拒绝（旧版"不烧只记违规"= 双份注入还免烧的合法通道）
+  writeFileSync(join(auditDir, 'vault.json'), JSON.stringify({
+    pw2: { value: 'Tw1ce-Burn-XYZ', oneShot: true },
+  }), { mode: 0o600 })
+  const dupRun = await run('shell_run', { session: auditId, command: '{{v:pw2}} {{v:pw2}}' }, EXEC)
+  check(String(dupRun).includes('REFUSED') && String(dupRun).includes('只能引用一次'),
+    'oneShot 同条重复引用 → 整条拒绝什么都没发送')
+  const dupList = await run('shell_manage', { action: 'vault-list' }, EXEC)
+  check(dupList.includes('{{v:pw2}}'), '展开层拒绝**不落刀**（什么都没发出去，键保留）')
+  const dupScreen = await run('shell_read', { session: auditId, mode: 'screen' }, EXEC)
+  check(!String(dupScreen).includes('Tw1ce-Burn-XYZ'), '被拒的展开值没进过屏')
+  const ok2Run = await run('shell_run', { session: auditId, steps: [
+    { send: "read -p 'q> ' v2", expect: 'match:q>', timeout: 5000 },
+    { send: '{{v:pw2}}', expect: 'idle', timeout: 5000 },
+  ] }, EXEC)
+  check(String(ok2Run).includes('全部 2 步通过'),
+    '单次裸引用注入正常（0.3.1 唯一允许形态 + maskVaultLine 遮蔽）')
+  await settle()   // 落刀后的异步账（删键）先落地再验文件
+  const after2 = JSON.parse(readFileSync(join(auditDir, 'vault.json'), 'utf8'))
+  check(after2.pw2 === undefined, 'oneShot 送出后已从库里烧掉（发送前落刀的异步账）')
+  // 增长预言机断死（性质主体在 test-pure 的 maskVaultLine 锁里）：猜前缀得到**原样回显**
+  const guessRun = await run('shell_run', { session: auditId, command: 'echo Tw1ce-Bu' }, EXEC)
+  check(String(guessRun).includes('Tw1ce-Bu'),
+    '猜前缀的输出行不被改写 —— 没有"猜对一位"的可观测信号')
   const mMark = readLines().length
   await run('shell_manage', { action: 'macro-set', name: 'edge-m1', text: 'echo EDGE-MACRO-1', scope: 'global' }, EXEC)
   await settle()
@@ -1596,7 +1656,8 @@ const idOf = async (label, callFn) => {
   await run('shell_manage', { action: 'close', session: ownedId })
 
   // 6) 查询面：工具与 HTTP 都能读回审计
-  const auditText = await run('shell_audit', { session: auditId, lines: 20 })
+  // （窗口 60：0.3.1 的 vault/裸引用用例给同一 auditId 追加了十来条 input，20 会挤掉 marker）
+  const auditText = await run('shell_audit', { session: auditId, lines: 60 })
   check(String(auditText).includes('audit dir:') && String(auditText).includes('audit-marker-555'),
     `shell_audit 能查回输入记录：${String(auditText).split('\n').slice(0, 2).join(' | ')}`)
   check(String(auditText).includes('output transcripts:'), 'shell_audit 同时报告留痕文件')

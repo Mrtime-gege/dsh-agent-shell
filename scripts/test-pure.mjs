@@ -5,7 +5,7 @@ import {
   NAME_PREFIX, DANGEROUS, scanDanger, dangerCode, sanitizeName, clamp, parseTmuxVersion, idleClosable,
   shouldWrapExit, wrapExitCommand, parseExitFromTail, diffSince, stripCommandEcho, redactSecrets,
   parseWaitFor, summarizeFailure, doctorAdvice,
-  extractRefs, applyRefs, macroVisible, macroSubmitWantsEnter, vaultConsumeNow, REF_KEY_RE,
+  extractRefs, applyRefs, macroVisible, macroSubmitWantsEnter, vaultConsumeNow, maskVaultLine, REF_KEY_RE,
 } from '../lib/pure.mjs'
 // tmux.js 零 DSH 依赖（只引 node:fs/promises 与 node:child_process）—— 纯逻辑可离线测
 import { drillForeground, normalizeReply, readDescendantProcs } from '../lib/tmux.js'
@@ -449,11 +449,42 @@ import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } fro
   pass(macroSubmitWantsEnter('line1\nline2') === true, '多行宏尾部有未提交行 → 要 Enter')
   pass(macroSubmitWantsEnter('line1\nline2\n') === false, '多行宏自己以换行结尾 → 别再补 Enter（防空提交）')
 
-  pass(vaultConsumeNow({ entry: { oneShot: true }, repeat: 1 }).consume === true, 'oneShot 单次引用 → 用后即焚')
-  const twice = vaultConsumeNow({ entry: { oneShot: true }, repeat: 2 })
-  pass(twice.consume === false && twice.violation === true, 'oneShot 同条命令重复引用 → 不烧 + 记违规（防绕过一次性）')
-  pass(vaultConsumeNow({ entry: {}, repeat: 1 }).usesBump === true, '非 oneShot → 只计数不烧')
-  pass(vaultConsumeNow({ entry: undefined, repeat: 1 }).consume === false, '键不存在 → 安全空操作')
+  pass(vaultConsumeNow({ entry: { oneShot: true } }).consume === true, 'oneShot → 烧（0.3.1 发送前落刀：一次引用一次消耗）')
+  pass(vaultConsumeNow({ entry: {} }).usesBump === true, '非 oneShot → 只计数不烧')
+  pass(vaultConsumeNow({ entry: undefined }).consume === false, '键不存在 → 安全空操作')
+  // 0.3.1 防绕过：oneShot 重复引用在**展开层**拒绝整条（旧版"不烧只计违规"= 双份注入还免烧）
+  const rep1 = applyRefs('{{v:pw}} {{v:pw}}', { pw: { value: 'S3cr3tV', oneShot: true } }, {}, 'A', 'dsh-1')
+  pass(rep1.ok === false && /只能引用一次/.test(rep1.error), 'oneShot 同条重复引用 → 展开层整条拒绝')
+  const repMac = applyRefs('{{m:c}} 再补 {{v:pw}}', { pw: { value: 'S3cr3tV', oneShot: true } }, { c: { text: 'pre {{v:pw}} post', scope: 'global' } }, 'A', 'dsh-1')
+  pass(repMac.ok === false, '明面一次 + 宏里一次 = 两份 → 跨趟计数同样拒绝')
+  const repRe = applyRefs('{{v:ok2}} {{v:ok2}}', { ok2: { value: 'R3useV' } }, {}, 'A', 'dsh-1')
+  pass(repRe.ok === true && repRe.text === 'R3useV R3useV', '非 oneShot 允许重复引用（uses 计数由发送方处理）')
+  const single = applyRefs('echo {{v:pw}}', { pw: { value: 'S3cr3tV', oneShot: true } }, {}, 'A', 'dsh-1')
+  pass(single.ok === true && single.text === 'echo S3cr3tV', 'oneShot 单次引用 → 正常展开')
+  pass(single.directVault.length === 1 && single.directVault[0] === 'pw',
+    'directVault 标记"原文直引 vault"（AI 侧裸引用规则的判据；宏内嵌不算 direct）')
+  const viaMacro = applyRefs('ssh {{m:bastion}}', { psd: { value: 'S3cr3tV' } },
+    { bastion: { text: 'ssh h -p {{v:psd}}', scope: 'global' } }, 'A', 'dsh-1')
+  pass(viaMacro.ok === true && viaMacro.usedVault.length === 1 && viaMacro.directVault.length === 0,
+    '闭环形态"ssh {{m:bastion}}"（秘密藏宏里）：usedVault 有、directVault 空 → 不受 AI 裸引用规则限制')
+  const sfV = applyRefs('{{m:fill}}', { psd: { value: 'S3cr3tV' } },
+    { fill: { text: 'user={{v:psd}}', scope: 'global', submit: false } }, 'A', 'dsh-1')
+  pass(sfV.ok === false && /submit:false/.test(sfV.error),
+    'submit:false 宏嵌 {{v:}} → 拒绝展开（值不许悬在未提交的行上等拼接）')
+  const sfOk = applyRefs('{{m:fill2}}', {}, { fill2: { text: 'printf "user>"', scope: 'global', submit: false } }, 'A', 'dsh-1')
+  pass(sfOk.ok === true && sfOk.text === 'printf "user>"', 'submit:false 不嵌秘密照常允许（纯填充形态）')
+  // 0.3.1 行身份打码（maskVaultLine）：只遮"注入所在行"，全局串替换的包含预言机断死
+  const ent = [{ sent: 'echo S3cr3tV', values: [{ v: 'S3cr3tV', key: 'pw' }] }]
+  pass(maskVaultLine('└─$ echo S3cr3tV ; _dsh_x=$?', ent).includes('[vault:{{v:pw}}]'), '命令回显行含完整注入文本 → 行内遮蔽')
+  pass(maskVaultLine('  S3cr3tV', ent).trim() === '[vault:{{v:pw}}]', '秘密独占整行（tty 回显形态）→ 遮蔽')
+  pass(maskVaultLine('S3cr3t', ent) === 'S3cr3t', '猜前缀的输出行原样返回 —— 增长预言机不存在')
+  pass(maskVaultLine('[sudo] password for S3cr3tV', ent).endsWith('[vault:{{v:pw}}]'), '值在行尾（带前缀回显）→ 尾锚定遮蔽')
+  pass(maskVaultLine('S3cr3t extra', ent) === 'S3cr3t extra', '部分串（前缀+尾巴）不触发尾锚定')
+  pass(maskVaultLine('S3cr3tV extra tail', ent) === 'S3cr3tV extra tail', '值在行内但不独占整行且不含注入原文 → 不遮（宁可放过串扰，不给预言机留缝）')
+  pass(maskVaultLine('ps aux | grep x', ent) === 'ps aux | grep x', '无关行不动')
+  const entBare = [{ sent: 'S3cr3tV', values: [{ v: 'S3cr3tV', key: 'pw' }] }]
+  pass(maskVaultLine('┌──(user㉿host)─[~/S3cr3tV]', entBare) === '┌──(user㉿host)─[~/S3cr3tV]', '裸注入（sent==值）不对值做包含式连坐遮蔽（0.3.0 提示符被遮的根因）')
+  pass(maskVaultLine('S3cr3tV', entBare).trim() === '[vault:{{v:pw}}]', '裸注入的值独占行仍遮蔽')
   pass(REF_KEY_RE.test('a.b_c-1') && !REF_KEY_RE.test('a b') && !REF_KEY_RE.test('a;b'), '引用键白名单（分号/空格进不了文件名与 tmux 目标）')
 }
 
