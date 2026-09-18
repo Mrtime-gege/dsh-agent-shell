@@ -9,16 +9,11 @@
 
 **中文**（本文件） · [**English**](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.en.md)
 
-## ⚠️ 版本公告（2026-09-18）：`0.3.0` 不可用，修复版 `0.3.1` 已发布
+## 🙋 作者的话（请先读）
 
-**`0.3.0` 不要使用**——它带四个已确认的问题（0.3.1 全部修复并有回归锁）：
+**这是一个人的业余项目，不是全职开发，也与任何官方无关。** 设计与测试都按自己的工程标准来，但节奏受现实约束：**主业加班、健康、token/机器费用**都会直接影响更新速度——可能一周三版，也可能一个月没动静；issue 看精力回，PR 欢迎但不承诺合并时限。这里**没有 SLA、没有付费支持、没有"随时在线的维护者"**。
 
-1. **vault 秘密值泄露**：`shell_read` 的 `history` / `screen` / `since` / `summary` 四个读屏出口绕过打码层，把秘密值明文吐给 AI（用 0.3.0 的 vault 功能必中）。
-2. **打码机制可被逐字符猜密**：值遮蔽是全局字符串替换，构成"包含预言机"——发 `echo 猜串` 观察是否被遮即可增长猜出秘密；还会连坐误伤无关文本。
-3. **oneShot"注入即焚"可被绕过**：烧键绑在发送返回值上，"报错但字节已进管道"的形态让键幸存可反复注入；同一条命令重复引用还能一次拿双份。
-4. **并发开壳丢归属记录**：`sessions.json` 落盘竞态会丢条目，dsh 重启后"这个壳是谁开的"记录缺失。
-
-**`0.3.1`（2026-09-18）已发布到 npm**：正常安装即得（若 `latest` 尚在注册表传播窗口内，可显式 `npx -y dsh-agent-shell@0.3.1 install`）。已装 0.3.0 的直接重装升级；升级前**先不要用 vault / `{{v:}}` 引用**（其余功能不受这四条影响）。0.3.1 同时新增 **AI 侧裸引用规则**（`{{v:}}` 只能整条喂密码提示，命令行/管道形态一律拒绝——防"转换外泄"，见 SECURITY §10）。npm 页面 README 随版本冻结，本公告以 GitHub 仓库为准。
+所以请把预期放在：① 关键场景请自备回退方案；② 升版前扫一眼 [CHANGELOG](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md)（安全类修复会尽量在公告里写明）；③ MIT 协议，风险自负（下文风险清单请务必读完）。如果它帮到了你，给个 star、或者把它讲给更多人，就是对"用爱发版"最实在的支持。感谢理解 —— 我们尽量把每个版本都发得干净。
 
 ## ⚠️ 风险，先读清楚再决定装不装
 
@@ -41,7 +36,7 @@
 先决条件：**Linux**（含 WSL2/容器）、Node ≥ 20、运行的 DSH（0.1.5+）。然后：
 
 ```sh
-npx -y dsh-agent-shell install [--profile web]     # 当前 0.3.1（⚠️ 勿用 0.3.0，见顶部版本公告）
+npx -y dsh-agent-shell install [--profile web]     # 当前 0.3.2
 ```
 
 会依次：登记进 profile 的依赖与 bundle → 按 pnpm/npm 装依赖 → 检查 tmux → 提示重启 `dsh web`。
@@ -146,16 +141,21 @@ dsh-agent-shell macros set deploy 'cd /srv/app && git pull && make restart'   # 
 
 ## 最近更新
 
-### 0.3.1（2026-09-18）— vault 安全返工（0.3.0 的四项问题在此修复，勿用 0.3.0）
+### 0.3.2（2026-09-19）— 稳健补丁批 + 并发锁 + 授权面板重排 + 长任务套件
 
-- **vault 打码返工为「行身份遮蔽」**：只遮注入所在的行（值独占整行 / 值在行尾 / 含完整注入命令原文的行），无关文本不再连坐误伤；"发 `echo 猜串` 观察是否被遮"的逐字符增长预言机断死（纯函数回归锁 8 条 + 实机锁）。
-- **oneShot 落刀提前到「送出那一刻」**：护栏通过后、字节进管道前同步标记消耗——"发送报错但其实已送达"骗不过一次性；护栏**拒绝**的命令不烧（键保留可再用）；同键一次发送引用 ≥2 次（含藏在宏里的第二份）在展开层**整条拒绝**。
-- **四个读屏出口接回打码层**：`shell_read` 的 `history`/`screen`/`since`/`summary` 曾把 vault 值明文返回（0.2.3 脱敏体系的潜伏缺陷，被 0.3.0 的 vault 放大成必中泄露），已修 + 每出口一条回归锁。
-- **并发开壳丢归属修复**：`sessions.json` 落盘改串行队列（整表快照乱序覆盖会丢新条目，重启后"谁开的壳"缺失），落盘失败从静默改为显式告警；闲置回收日志改印该会话实际生效时长。
-- **面板**：⚙ 菜单第三页签更名**「引用库」**（子页签 `{{v: 秘密键}}` / `{{m: 宏命令}}`）；进入页签每次重拉数据——外部烧键/CLI 改动不再滞留旧显示；移除标题栏 `+N 行` 徽标（会换行撑高标题栏；新输出仍有点脉冲提示）。
-- **文档边界补全**：命令行注入形态的明文会进 bash history（真密钥请走 `sudo -S`/`read -s` 的 stdin 提示形态）+ 清理指引；"值的哈希也算泄露"（截断 sha 对弱值秒级字典还原；插件自身从不产哈希）。
+- **vault/宏库损坏显式报**：区分"没建库"与"文件坏了"。损坏时列表报损、一切引用 REFUSED（不再误报"没有键"）、写入拒合并防覆盖、坏文件零字节不动；修好即恢复。CLI 同步拒写。
+- **面板×烧键并发锁**：vault/macros 全部「读→改→写」（HTTP set/rm、落刀异步账、TTL 过期扫描）按域串行互斥；写盘 tmp+rename 原子替换——"AI 正在烧键时面板录键"不再丢更新；CLI 跨进程边界如实声明。
+- **oneShot 并发闸（spend-race）**：并发双发同一一次性键，落刀瞬间二次检查——恰好一发一拒，拒方零字节进管道且入账可查。
+- **弱形状警告**：录入检测过短/单字符类/与用户名同串互含/常见弱串/键盘序列——只报不拦（面板黄条 + CLI 提示）。
+- **键 TTL（opt-in）**：`ttlDays` 三入口（CLI/面板/HTTP），N 天未用自动焚（10 分钟粒度，`expire` 入账，缺时间戳永不误伤）。
+- **审计**：`GET /vault-history`（键使用史聚合，只有键名与引用原文）+ `GET /chain`（新鲜复验）；close 记录带留痕 `transcriptSha256+bytes`（删改留痕可证）；过滤视图头部不再陈旧计数。
+- **redactSecrets 跨行修复**：`password:` 形状规则原会跨行吞掉提示**下一行**的真实输出（ssh 排障实锤"假失败"）；收紧为同行空白，HTTP 折叠头仍由 Bearer 规则兜住。
+- **`file:` 等待支持 `~`** 展开（waitFor/steps 一致）。
+- **长任务套件** `scripts/test-longrun.mjs`（可复用固定流程）：5 路并行/300 步流式/工具链 17 项/vim+REPL 交互/sudo+ssh 凭据自适应（缺凭据自动 SKIP，CI 可跑）/oneShot 并发竞态/close 见证/链复验/临时密钥目录自毁。教训钉进脚本：pane 环境无 USER/LOGNAME，取用户名必须 `$(id -un)`。
+- **授权面板重排**：三等宽 sticky 页签（单对话授权/所有对话授权/引用库）、浮层 525px、两子页统一骨架（新增区在上、现有列表带计数）、全表格化列宽按内容（时间定宽）、键名点击复制引用形态、表头悬停说明（TTL 含义写清）。
+- **CI**：测试失败自动上传日志 artifact；每周一性能基线周报（只报告不阻断）。**文档**：《升级注意-0.2到0.3》迁移指南；英文 README 冻结于 0.3.1（中文唯一权威）。
 
-> 本 README 只保留最近一次更新。0.3.0（人机双接管 / 双域输入 / steps·expect / 闲置默认永久）、0.2.3（工具精简 10→7 / AI 精准四件套 / 面板重做）及更早内容，见 [docs/CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md)（逐版清单）与 [docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md)（根因与验证）。
+> 本 README 只保留最近一批更新；更早版本见 [docs/CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md) 与 [docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md)。
 
 ## 详细文档
 
@@ -163,10 +163,40 @@ dsh-agent-shell macros set deploy 'cd /srv/app && git pull && make restart'   # 
 |---|---|
 | [docs/使用细节.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/使用细节.md) | 面板/工具用法、配置项、HTTP API、工作原理 |
 | [docs/SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md) | 安全模型、审计边界、已知限制 |
+| [docs/升级注意-0.2到0.3.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/升级注意-0.2到0.3.md) | 0.2.x 升 0.3.x 的语义变化与迁移须知 |
 | [docs/CHANGELOG.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/CHANGELOG.md) | 版本变化 |
 | [docs/更新记录.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/更新记录.md) | 完整改动记录（根因 + 验证） |
 | [docs/设计与实现.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/设计与实现.md) | 内部结构 |
 | [docs/PUBLISHING.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/PUBLISHING.md) | 发布流程 |
+
+## 给 AI 助手的操作卡（安装 · 验收 · 答疑）
+
+> 这一段写给**正在读这份 README 的 AI**：用户让你安装/验证本插件，或问"这是干什么的"，照下面执行。
+
+### A. 安装（用户让你装时才装；装前把上方风险清单的要点先给用户看一眼）
+
+```sh
+npx -y dsh-agent-shell install            # 登记进当前 profile（--profile <名> 可指定）
+npx -y dsh-agent-shell doctor             # 三行都应 ✓：tmux / profile「x」已安装 / 数据目录
+```
+
+然后**提醒用户重启宿主**（`dsh web` 重启，不是刷新页面；宿主代码在启动时加载）。重启后你这侧的会话会在新进程里继续。
+
+### B. 验收（按序做，全过才算装好）
+
+1. **挂载确认**：调用 `shell_state` —— 返回里应有 `settings:`、`capability:`、`server: running (socket -L dsh-agent)` 三族信息；找不到该工具 = 没挂载（回 A 查 profile / 是否重启）。
+2. **tmux 真驱动**：`shell_open {name:"verify"}` → 应返回 `session dsh-xxxxxx …`；对返回的 id `shell_run {command:"echo ok-$((6*7))"}` → 屏上必须出现 `ok-42`（这条打通 send-keys→tty→渲染→capture 全链路）；`shell_manage {action:"close", session:<id>}` 收尾。
+3. **审计链**：`shell_audit {days:1, lines:5}` 头部有 `chain: ✓`；要更强保证让用户跑 `dsh-agent-shell verify-audit`（退出码 0 = 链完整）。
+4. **面板（人侧）**：让用户看浏览器右下角应有 `>_ N` 悬浮胶囊，点开能看到刚才的会话；没有就请用户**刷新页面**（面板资源随宿主加载）。
+5. WSL2 等无 systemd 环境：`capability` 行会显示降级方式（如 tmux 直启），属正常，功能不缺失。
+
+### C. 有人问"这个插件是干什么的"——按这个口径回答
+
+> 一句话：它给 DSH 加装**真实、持久、可审计**的终端——AI 用 7 个 `shell_*` 工具驱动多个后台 tmux 会话（长任务、vim/ssh 这类交互程序、跨对话接管），人用右下角悬浮面板随时旁观或直接上手打字；人和 AI 可以在同一批终端上互相**接管/交还**（`claim` / `release` / 原生 `tmux -L dsh-agent attach`）。每一次输入都进哈希链审计，输出留痕是原始字节（close 记录带 sha256 见证，删改可证）；vault 秘密域让密码"值不过 AI 之手"，宏域让重复命令可以安全沉淀。
+>
+> 必须同时讲清的三件事：① 它**把真 shell 交给 AI**——危险命令护栏是减速带不是沙箱，装之前让对方读 README 风险清单；② 它**不是**受限执行环境，也不弹审批；③ 审计默认"可检测篡改"，要内核级不可篡改需 `install-deps.sh --audit-lock`。
+
+安装/排障细节在 [docs/使用细节.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/使用细节.md)；安全边界以 [docs/SECURITY.md](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/docs/SECURITY.md) 为准。
 
 ## 许可证
 

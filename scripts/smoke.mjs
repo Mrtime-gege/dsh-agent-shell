@@ -219,7 +219,7 @@ mod.apply(ctx, {
 })
 
 check(tools.size === 7, `注册工具数 = ${tools.size}（期望 7——0.2.3 精简：shell_wait→shell_read、shell_check→dryrun、shell_consent→shell_state）`)
-check(routes.size === 20, `注册 HTTP 路由数 = ${routes.size}（期望 20：list/screen/audit/consent/settings/diagnose/debugctl/keys/new/kill/resize/rename/busy/actors + 0.3.0 双域六条 vault-list/set/rm + macro-list/set/rm）`)
+check(routes.size === 22, `注册 HTTP 路由数 = ${routes.size}（期望 22：…双域六条 + 0.3.2 vault-history/chain 两条）`)
 
 // 4.5 依赖自检脚本（随包发布：AI 靠它判断要不要装 tmux）
 {

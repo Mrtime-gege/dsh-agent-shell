@@ -18,10 +18,11 @@
  * 零外部依赖（只用 Node 内建），可离线跑。
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { inspectSecretStrength, parseDomainFile } from '../lib/pure.mjs'
 
 const PKG = 'dsh-agent-shell'
 // 版本来自包自身（npx 装下来的就是它）
@@ -245,7 +246,21 @@ function auditDirOf() {
   return flagValue('audit-dir', join(dshHome(), 'agent-shell'))
 }
 function readJsonFile(p) { try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return {} } }
-function writeJson0600(p, obj) { writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 }) }
+// 0.3.2 ①：vault/macros 走严格读——"文件坏了"与"还没建文件"必须分开；损坏时拒绝继续，
+// 绝不让 set/rm 的整表写回把可能可抢救的原文件覆盖掉。
+function readDomainStrict(p, domain) {
+  let raw = ''
+  try { raw = readFileSync(p, 'utf8') } catch { raw = '' }
+  const r = parseDomainFile(raw, domain)
+  if (r.ok !== true) fail(String(r.error))
+  return r.data
+}
+function writeJson0600(p, obj) {
+  // 0.3.2 原子写：tmp+rename（与插件侧同纪）。跨进程锁不共享——文件至多旧一版，不会半截。
+  const tmp = p + '.tmp-' + process.pid
+  writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, p)
+}
 function positional(skip) {
   return args.filter((a) => !a.startsWith('--') && !skip.includes(a))
 }
@@ -254,12 +269,12 @@ function vaultCli() {
   const sub = positional(['vault'])[0] ?? 'list'
   const dir = auditDirOf()
   const file = join(dir, 'vault.json')
-  const vault = readJsonFile(file)
+  const vault = readDomainStrict(file, 'vault')
   if (sub === 'list') {
     const items = Object.entries(vault)
     if (items.length === 0) { echo('(vault 为空 —— 用 vault set <键> <值> 录入)'); return }
     for (const [k, e] of items) {
-      echo(`{{v:${k}}}  ${e.oneShot === true ? '一次性' : '可重复'}  用过 ${e.uses ?? 0} 次${e.note ? '  — ' + e.note : ''}`)
+      echo(`{{v:${k}}}  ${e.oneShot === true ? '一次性' : '可重复'}  用过 ${e.uses ?? 0} 次${Number(e.ttlDays) > 0 ? `  ${Number(e.ttlDays)} 天未用自动焚` : ''}${e.note ? '  — ' + e.note : ''}`)
     }
     return
   }
@@ -273,9 +288,16 @@ function vaultCli() {
       uses: Number(vault[key]?.uses ?? 0),
       createdAt: Number(vault[key]?.createdAt ?? Date.now()), updatedAt: Date.now(),
     }
+    // 0.3.2 ③：可选 TTL（天）：N 天未被使用即自动焚毁（sweeper 执行，入账 expire 事件）
+    const ttl = Number(flagValue('ttl-days', '0'))
+    if (Number.isFinite(ttl) && ttl > 0) vault[key].ttlDays = Math.floor(ttl)
     mkdirSync(dir, { recursive: true })
     writeJson0600(file, vault)
-    ok(`{{v:${key}}} 已保存（${vault[key].oneShot ? '一次性：注入成功即焚' : '可重复'}）→ ${file}（0600）`)
+    ok(`{{v:${key}}} 已保存（${vault[key].oneShot ? '一次性：注入成功即焚' : '可重复'}${ttl > 0 ? `，${Math.floor(ttl)} 天未用自动焚` : ''}）→ ${file}（0600）`)
+    // 0.3.2 ②：弱形状黄条（不阻断——强度是人的决定；这里只保证"不是没人告诉你"）
+    for (const w of inspectSecretStrength(value, { username: String(process.env.USER ?? process.env.LOGNAME ?? '') })) {
+      echo(`  ⚠ 弱形状：${w}（仍然保存了；是否更换由你定）`)
+    }
     echo('  边界：AI 只见键名，值不上屏不进账；但 output/ 留痕是原始字节流（值进过 pane 就在里面）—— 详见 SECURITY。')
     return
   }
@@ -294,7 +316,7 @@ function macrosCli() {
   const sub = positional(['macros'])[0] ?? 'list'
   const dir = auditDirOf()
   const file = join(dir, 'macros.json')
-  const macros = readJsonFile(file)
+  const macros = readDomainStrict(file, 'macros')
   if (sub === 'list') {
     const items = Object.entries(macros)
     if (items.length === 0) { echo('(还没有宏 —— 用 macros set <名> <内容> 创建)'); return }

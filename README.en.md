@@ -9,22 +9,25 @@
 
 [**English**](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.en.md) · [**中文**](https://github.com/Mrtime-gege/dsh-agent-shell/blob/main/README.md)
 
-## ⚠️ Version advisory (2026-09-18): `0.3.0` is unsafe — fixed in `0.3.1` (published)
+> **📌 Frozen doc: this English README stopped being maintained after version 0.3.1
+> (2026-09-18).** The Chinese README is the single source of truth for all current docs,
+> advisories and per-version notes — anything after 0.3.1 is documented there only
+> (https://github.com/Mrtime-gege/dsh-agent-shell#readme). This file stays published as a
+> reference snapshot; the risk picture below is still the honest one.
 
-**Do not use `0.3.0`.** It ships four confirmed issues: (1) vault secret values leaked
-in cleartext through the `shell_read` `history`/`screen`/`since`/`summary` exits; (2)
-value masking was global string replacement — an inclusion oracle enabling char-by-char
-secret guessing; (3) one-shot "burn on success" keyed off the send return value (a
-failed-but-delivered send spared the key; duplicate refs injected twice); (4) concurrent
-`shell_open` races could drop ownership records from `sessions.json`. **All four are
-fixed in `0.3.1` (2026-09-18, published to npm)** with regression locks; if `latest`
-is still mid-propagation, install explicitly: `npx -y dsh-agent-shell@0.3.1 install`.
-0.3.1 additionally introduces an AI-side bare-reference rule (`{{v:}}` may only be sent
-as the entire input — a stdin password prompt; command-line/pipe forms are refused to
-kill transform-based exfiltration; see SECURITY §10). If you stayed on 0.3.0, stop using
-vault / `{{v:}}` references until you upgrade. npm freezes READMEs per version; this
-advisory lives in the GitHub repo and supersedes the published one.
+## 🙋 A note from the author (please read)
 
+**This is a one-person side project — not full-time development, and not affiliated with
+any official entity.** Design and testing follow my own engineering standards, but the
+pace is bound to reality: day-job overtime, health, and token/machine costs all move the
+release train — expect bursts, and expect gaps. Issues get answered when energy allows;
+PRs are welcome without merge promises. There is **no SLA, no paid support, no
+always-on maintainer**.
+
+So please: ① keep your own fallback for anything critical; ② skim the CHANGELOG before
+upgrading (security fixes are flagged there); ③ MIT licensed, use at your own risk — do
+read the risk list below first. If it helps you, a star or telling more people is the
+most practical support a "runs on love and tokens" project can get. Thank you.
 
 ## ⚠️ Read the risks first
 
@@ -51,7 +54,7 @@ This hands a real shell to the AI. It is not a toy and not a sandbox.
 Linux (incl. WSL2/containers), Node ≥ 20, a running DSH (0.1.5+):
 
 ```sh
-npx -y dsh-agent-shell install [--profile web]   # current 0.3.1 (⚠️ never use 0.3.0 — see advisory)
+npx -y dsh-agent-shell install [--profile web]   # current 0.3.1
 ```
 
 Registers the dependency and bundle into the profile → installs via pnpm/npm → checks tmux →
@@ -112,7 +115,7 @@ from 0.2.2).
 
 ## Recent changes
 
-### 0.3.1 (2026-09-18) — vault security rework (fixes all four 0.3.0 issues; do not use 0.3.0)
+### 0.3.1 (2026-09-18) — vault security rework (four findings: leaking read exits / inclusion oracle / fake-failure burn / transform exfil)
 
 - **Vault masking reworked to line identity**: only the lines the injection itself
   produced get masked (value occupying the line / ending the line / a line containing the

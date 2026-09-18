@@ -17,7 +17,7 @@
  * 用法：DSH_PEERS_DIR=/path/to/dsh-webui node scripts/test-edge.mjs [tgz]
  */
 
-import { existsSync, readFileSync, rmSync, readdirSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, readdirSync, readlinkSync, statSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -1325,6 +1325,82 @@ const idOf = async (label, callFn) => {
   check(missing.length === 0, `并发开 4 壳归属表全落盘（缺失：${missing.join(',') || '无'}）`)
   for (const id of raceIds) await hRace.run('shell_manage', { action: 'close', session: id })
   hRace.cleanup()
+}
+
+/* ── 7.94g 0.3.2 并发锁：面板三连 set（vault+macros）与烧键互不丢更新（读-改-写按域串行） ── */
+{
+  const cDir = mkdtempSync(join(tmpdir(), 'dsh-conc-'))
+  const hC = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-conc`,
+    config: { watchdog: false, auditDir: cDir, __actor: 'conc-session' },
+  })
+  const vs = await Promise.all(['ca', 'cb', 'cc'].map((k) => hC.call('/vault-set', 'POST', { key: k, value: 'Val-' + k + '-pad', oneShot: false })))
+  check(vs.every((r) => r.code === 200), `并发 vault-set ×3 全 200（${vs.map((r) => r.code).join(',')}）`)
+  const vb = JSON.parse(readFileSync(join(cDir, 'vault.json'), 'utf8'))
+  check(['ca', 'cb', 'cc'].every((k) => vb[k] !== undefined), '并发三键全落库（域锁关死丢更新）')
+  const ms = await Promise.all(['ma', 'mb'].map((n) => hC.call('/macro-set', 'POST', { name: n, text: 'echo ' + n, scope: 'global' })))
+  check(ms.every((r) => r.code === 200), '并发 macro-set ×2 全 200')
+  const mb = JSON.parse(readFileSync(join(cDir, 'macros.json'), 'utf8'))
+  check(['ma', 'mb'].every((n) => mb[n] !== undefined), '并发宏全落库')
+  hC.cleanup()
+}
+
+/* ── 7.94f 0.3.2：库损坏显式报 / file:~ 展开 / 留痕见证入链 / 链与消耗史路由 / 弱形状黄条 ── */
+{
+  const sDir = join(tmpdir(), `dsh-edge-s032-${Date.now()}`)
+  const hS = await makeHarness({
+    tgz, peersDir, socket: `${SOCKET}-s032`,
+    config: { watchdog: false, auditDir: sDir, __actor: 's032-session' },
+  })
+  const sOpen = await hS.run('shell_open', { cwd: '/tmp', name: 's032' })
+  const sId = String(sOpen).match(/session (\S+)/)[1]
+  const sDay = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()
+  const sAudit = () => readFileSync(join(sDir, `audit-${sDay}.jsonl`), 'utf8').split('\n').filter((l) => l.trim() !== '').map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+  // ① 损坏的 vault.json：读→报损、引用→拒绝、写→拒合并、原文件→原样保住
+  writeFileSync(join(sDir, 'vault.json'), '{ broken,', { mode: 0o600 })
+  const corruptList = await hS.run('shell_manage', { action: 'vault-list' })
+  check(String(corruptList).includes('解析失败'), `损坏库 vault-list 显式报损：${String(corruptList).split('\n')[0].slice(0, 36)}…`)
+  const corruptRef = await hS.run('shell_run', { session: sId, command: '{{v:any}}' })
+  check(String(corruptRef).includes('REFUSED') && String(corruptRef).includes('解析失败'),
+    '损坏库引用被拒且报真实原因（不误报"没有键"）')
+  const sSetR = await hS.call('/vault-set', 'POST', { key: 'x', value: 'whatever12' })
+  check(sSetR.code === 409, `损坏库拒收面板写入（HTTP ${sSetR.code}，防整表覆盖可抢救内容》`)
+  check(readFileSync(join(sDir, 'vault.json'), 'utf8') === '{ broken,', '坏文件一个字节没动')
+  // 修复即销牌
+  writeFileSync(join(sDir, 'vault.json'), JSON.stringify({ ok32: { value: 'Str0ng!032xy', oneShot: false } }), { mode: 0o600 })
+  const healed = await hS.run('shell_manage', { action: 'vault-list' })
+  check(healed.includes('{{v:ok32}}'), '文件修好后下一次读取即恢复正常')
+  // ② 弱形状黄条（面板 /vault-set 的响应带 warn；保存成功但提示）
+  const weakR = await hS.call('/vault-set', 'POST', { key: 'pw-weak', value: '123456', oneShot: false })
+  check(weakR.code === 200 && Array.isArray(weakR.body?.warn) && weakR.body.warn.length > 0,
+    `弱口令保存成功+warn×${weakR.body?.warn?.length ?? 0}（②只报不拦）`)
+  const strongR = await hS.call('/vault-set', 'POST', { key: 'pw-ok', value: 'Xk9#mQ2$ev7!zR4', oneShot: true, ttlDays: 3 })
+  check(strongR.code === 200 && (strongR.body?.warn ?? []).length === 0, '强随机零告警（不误伤）')
+  const ttlView = await hS.run('shell_manage', { action: 'vault-list' })
+  check(ttlView.includes('ttl=3d'), '③ TTL 随 set 落库并在 vault-list 可见')
+  // ⑨ file:~/ 展开（真实等待一个家目录文件出现）
+  const tildeR = await hS.run('shell_run', {
+    session: sId, command: 'rm -f ~/dsh-032.flag; sleep 0.4; touch ~/dsh-032.flag',
+    waitFor: 'file:~/dsh-032.flag', waitTimeout: 10000, lines: 1,
+  })
+  check(String(tildeR).includes('条件达成'), `0.3.2 ⑨ file:~/ 波浪号等待（${String(tildeR).split(' ')[1] ?? ''}）`)
+  await hS.run('shell_run', { session: sId, command: 'rm -f ~/dsh-032.flag', lines: 1 })
+  // ⑥ close 记录带留痕见证（sha256+bytes）
+  await hS.run('shell_manage', { action: 'close', session: sId })
+  await new Promise((r) => setTimeout(r, 400))
+  const closeRec = sAudit().filter((r) => r.event === 'close' && r.shell === sId).pop()
+  check(closeRec !== undefined && typeof closeRec.transcriptSha256 === 'string' && closeRec.transcriptSha256.length === 64
+    && Number(closeRec.transcriptBytes) > 0,
+    `0.3.2 ⑥ 关闭记录带留痕见证 sha256（${closeRec ? closeRec.transcriptBytes + 'B' : '无记录'}）`)
+  // ④ 消耗史聚合 + ⑪ 链状态路由
+  const hisR = await hS.call('/vault-history', 'GET')
+  check(hisR.code === 200 && Array.isArray(hisR.body?.items) && hisR.body.items.some((r) => r.kind === 'set'),
+    `0.3.2 ④ /vault-history 聚合到面板录入事件（${hisR.body?.items?.length ?? 0} 条）`)
+  const chainR = await hS.call('/chain', 'GET')
+  check(chainR.code === 200 && chainR.body?.ok === true && Number(chainR.body?.sealed) > 0 && Number(chainR.body?.transcripts) >= 1,
+    `0.3.2 ⑪ /chain 新鲜复验（sealed=${chainR.body?.sealed}·留痕=${chainR.body?.transcripts}）`)
+  hS.cleanup()
 }
 
 /* ── 7.95 首次使用确认门：一个对话第一次用，必须先由用户手动确认 ─────────────── */

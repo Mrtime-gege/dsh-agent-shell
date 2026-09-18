@@ -1,0 +1,46 @@
+# 性能基线周报（0.3.2 ⑧）：每周对打包产物 + runner 上的真 tmux 跑一次 bench-runtime，
+# 把热路径 p50/p95 存成 artifact。刻意**不判定、不阻断**——红线条款因机器差异太大，
+# 这里只留趋势数字；红线复核对齐留给维护者本地。
+name: 性能基线（周报）
+
+on:
+  schedule:
+    - cron: '30 2 * * 1'   # 每周一 02:30 UTC（北京 10:30）
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v5
+
+      - name: 配置 Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: 安装 tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: 安装宿主 peer（与 CI 同款，从公共 registry 拉真实版本）
+        run: |
+          npm install --no-save --no-package-lock \
+            @deepseek-ai/dsh-tools@0.1.2-rc.1 \
+            @deepseek-ai/cordis@4.0.2 \
+            @deepseek-ai/schemastery@3.18.2
+
+      - name: 性能基线（非阻断：只留数字）
+        continue-on-error: true
+        run: node scripts/bench-runtime.mjs 15 2>&1 | tee /tmp/bench-report.txt
+
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-runtime-${{ github.run_number }}
+          path: /tmp/bench-report.txt
+          retention-days: 60

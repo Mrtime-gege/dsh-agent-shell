@@ -6,6 +6,7 @@ import {
   shouldWrapExit, wrapExitCommand, parseExitFromTail, diffSince, stripCommandEcho, redactSecrets,
   parseWaitFor, summarizeFailure, doctorAdvice,
   extractRefs, applyRefs, macroVisible, macroSubmitWantsEnter, vaultConsumeNow, maskVaultLine, REF_KEY_RE,
+  expandHome, inspectSecretStrength, vaultExpired, parseDomainFile,
 } from '../lib/pure.mjs'
 // tmux.js 零 DSH 依赖（只引 node:fs/promises 与 node:child_process）—— 纯逻辑可离线测
 import { drillForeground, normalizeReply, readDescendantProcs } from '../lib/tmux.js'
@@ -289,7 +290,11 @@ import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } fro
 
 {
   pass(!redactSecrets('API_KEY=abcd1234efgh').includes('abcd1234efgh'), 'API_KEY=… 被脱敏')
-  pass(!redactSecrets('password: hunter2secret').includes('hunter2secret'), 'password: … 被脱敏')
+  pass(!redactSecrets('password: hunter2secret').includes('hunter2secret'), 'password: … 被脱敏（同行）')
+  // 0.3.2 跨行修复：`password:` 提示后的下一行是真实输出时，不得被吞（ssh 排障实锤的假失败根因）
+  pass(redactSecrets("s1mple@host's password:\nSSH-LR-OK\nnext").includes('SSH-LR-OK'),
+    'password: 提示**下一行**的成功输出不被跨行吞掉')
+  pass(!redactSecrets('password:\thunter2secret').includes('hunter2secret'), 'password: 制表符同行仍脱敏')
   pass(redactSecrets('Authorization: Bearer abcdefghijklmn').includes('[redacted'), 'Bearer 令牌被脱敏')
   pass(redactSecrets('https://user:s3cr3tpw@example.com/repo').includes('***@') ||
     redactSecrets('https://user:s3cr3tpw@example.com/repo').includes('[redacted'), 'URL 内嵌口令被脱敏')
@@ -399,6 +404,30 @@ import { appendAudit, readAudit, summarizeRecord, GENESIS as AUDIT_GENESIS } fro
     '超过闲置时长 → 提示即将被自动关闭')
   pass(doctorAdvice({ foreground: 'bash', isShell: true, idleSec: 10, userBusy: true })[0].includes('人在操作'),
     '人在操作 → 说明 AI 写操作会让路')
+}
+
+/* ── 0.3.2：expandHome / inspectSecretStrength / vaultExpired / parseDomainFile ── */
+{
+  pass(expandHome('~/a', '/home/u') === '/home/u/a' && expandHome('~', '/home/u') === '/home/u',
+    'expandHome：整串 ~ 与前缀 ~/ 展开')
+  pass(expandHome('a/~/b', '/home/u') === 'a/~/b' && expandHome('~/x', '') === '~/x',
+    'expandHome：只认开头；无 home 原样（纯函数不碰 os）')
+  pass(parseWaitFor('file:~/done.flag', '/home/u').value === '/home/u/done.flag',
+    'waitFor file: 支持 ~/ 展开（0.3.2 ⑨）')
+  const w1 = inspectSecretStrength('123456', { username: 'root' })
+  pass(w1.length >= 2, '弱口令：纯数字常见串命中多条理由')
+  const w2 = inspectSecretStrength('Kal1', { username: 'Kal1' })
+  pass(w2.some((x) => x.includes('用户名')), '值=用户名必须点名（本轮实测教训的形状）')
+  const w3 = inspectSecretStrength('Xk9#mQ2$ev7!zR4', { username: 'kal1' })
+  pass(w3.length === 0, '强随机串：零告警（不误伤）')
+  const now = 1789600000000
+  pass(vaultExpired({ entry: { ttlDays: 7, createdAt: now - 8 * 86400000 }, now }) === true, 'TTL：超龄过期')
+  pass(vaultExpired({ entry: { ttlDays: 7, createdAt: now - 8 * 86400000, lastUsedAt: now - 86400000 }, now }) === false,
+    'TTL 从最后使用起算：近期用过不过期')
+  pass(vaultExpired({ entry: { createdAt: now - 99 * 86400000 }, now }) === false, '无 ttlDays 永不过期')
+  pass(parseDomainFile('', 'vault').ok === true, '空/缺失文件 = 合法空库')
+  pass(parseDomainFile('{ oops', 'vault').corrupt === true, '坏 JSON 判损坏（不再静默空库）')
+  pass(parseDomainFile('[1,2]', 'macros').corrupt === true, '数组/标量也判损坏（形状不对别当空库用）')
 }
 
 /* ── 0.3.0 双域引用：extractRefs / applyRefs / macroVisible / submit / oneShot ── */

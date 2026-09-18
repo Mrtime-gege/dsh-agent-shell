@@ -96,10 +96,21 @@ jobs:
         if: steps.tmux.outcome == 'success' && steps.peers.outcome == 'success'
         env:
           SMOKE_REQUIRE: '1'
-        run: npm run smoke
+        run: npm run smoke 2>&1 | tee /tmp/ci-smoke.log
 
       - name: 边界与错误路径测试
         if: steps.tmux.outcome == 'success' && steps.peers.outcome == 'success'
         env:
           SMOKE_REQUIRE: '1'
-        run: npm run test:edge
+        run: npm run test:edge 2>&1 | tee /tmp/ci-edge.log
+
+      # 0.3.2 ⑦：edge 步骤在 runner 上自 v0.2.0 起常红而本地全绿——此前只看见"红了"，
+      # 拿不到现场。失败时把两份完整日志传成 artifact（保留 14 天），下载即可定位。
+      - name: 失败时上传测试日志（诊断常红问题）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-logs-${{ github.run_number }}
+          path: /tmp/ci-*.log
+          if-no-files-found: ignore
+          retention-days: 14
